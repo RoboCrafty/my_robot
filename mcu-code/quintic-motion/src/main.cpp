@@ -4,15 +4,7 @@
 #include "motor_init.h"
 #include <math.h>
 #include <ArduinoEigen.h>
-
-// ================= LIMIT SWITCHES =================
-#define L1 5  // Base     (J1)      -- Normally low
-#define L2 36 // Shoulder (J2)      -- Normally high
-#define L3 39 // Elbow    (J3)      -- Normally high
-#define L4 18 // Wrist1   (J4)      -- Normally low
-#define L5 34 // Wrist2   (J5)      -- Normally high
-#define L6 35 // Wrist3   (J6)      -- Normally low
-
+#include "homing_sequence.h"
 
 // ================= UART PINS =================
 #define TMC_RX 15
@@ -36,52 +28,63 @@ void setup()
     delay(100);
 
     initJoints(1, 1, 1, 1, 1, 1, 1); 
-    pinMode(L1, INPUT_PULLUP);
-    pinMode(L2, INPUT_PULLUP);
-    pinMode(L3, INPUT_PULLUP);
-    pinMode(L4, INPUT_PULLUP);
-    pinMode(L5, INPUT_PULLUP); // Pin 18 supports INPUT_PULLUP if needed, but keeping as INPUT to match the rest
-    pinMode(L6, INPUT_PULLUP);
+    initLimitSwitches();
+    
 
     engine.init();
-    stepper1 = engine.stepperConnectToPin(J1_STEP_PIN);
-    stepper1->setDirectionPin(J1_DIR_PIN, true);
+    stepper1 = engine.stepperConnectToPin(Constants::Pins::J1_STEP_PIN);
+    stepper1->setDirectionPin(Constants::Pins::J1_DIR_PIN, true);
     stepper1->setAutoEnable(true);
     stepper1->setSpeedInHz(10000);      // steps/sec
     stepper1->setAcceleration(6000);     // steps/sec^2
     // stepper1->moveTo(15*J4_STEPS_PER_DEG); // Move to 15 degrees to start
 
 
-    stepper2 = engine.stepperConnectToPin(J2_STEP_PIN);
-    stepper2->setDirectionPin(J2_DIR_PIN, true);
+    stepper2 = engine.stepperConnectToPin(Constants::Pins::J2_STEP_PIN);
+    stepper2->setDirectionPin(Constants::Pins::J2_DIR_PIN, true);
     stepper2->setAutoEnable(true);
     stepper2->setSpeedInHz(10000);      // steps/sec
     stepper2->setAcceleration(6000);     // steps/sec^2
 
-    stepper3 = engine.stepperConnectToPin(J3_STEP_PIN);
-    stepper3->setDirectionPin(J3_DIR_PIN, true);
+    stepper3 = engine.stepperConnectToPin(Constants::Pins::J3_STEP_PIN);
+    stepper3->setDirectionPin(Constants::Pins::J3_DIR_PIN, true);
     stepper3->setAutoEnable(true);
     stepper3->setSpeedInHz(10000);      // steps/sec
     stepper3->setAcceleration(6000);     // steps/sec^2
 
-    stepper4 = engine.stepperConnectToPin(J4_STEP_PIN);
-    stepper4->setDirectionPin(J4_DIR_PIN, true);
+    stepper4 = engine.stepperConnectToPin(Constants::Pins::J4_STEP_PIN);
+    stepper4->setDirectionPin(Constants::Pins::J4_DIR_PIN, true);
     stepper4->setAutoEnable(true);
     stepper4->setSpeedInHz(10000);      // steps/sec
     stepper4->setAcceleration(6000);     // steps/sec^2
 
-    stepper5 = engine.stepperConnectToPin(J5_STEP_PIN);
-    stepper5->setDirectionPin(J5_DIR_PIN, true);
+    stepper5 = engine.stepperConnectToPin(Constants::Pins::J5_STEP_PIN);
+    stepper5->setDirectionPin(Constants::Pins::J5_DIR_PIN, true);
     stepper5->setAutoEnable(true);
     stepper5->setSpeedInHz(10000);      // steps/sec
     stepper5->setAcceleration(6000);     // steps/sec^2  
 
-    stepper6 = engine.stepperConnectToPin(J6_STEP_PIN);
-    stepper6->setDirectionPin(J6_DIR_PIN, true);
+    stepper6 = engine.stepperConnectToPin(Constants::Pins::J6_STEP_PIN);
+    stepper6->setDirectionPin(Constants::Pins::J6_DIR_PIN, true);
     stepper6->setAutoEnable(true);
     stepper6->setSpeedInHz(10000);      // steps/sec
     stepper6->setAcceleration(6000);     // steps/sec^2  
 
+
+
+    homeAxis(1);
+    homeAxis(2);
+    homeAxis(3);
+    homeAxis(4);
+    homeAxis(5);
+    delay(100);
+    stepper1->setCurrentPosition(0);
+    stepper2->setCurrentPosition(0);
+    stepper3->setCurrentPosition(0);
+    stepper4->setCurrentPosition(0);
+    stepper5->setCurrentPosition(0);
+    stepper6->setCurrentPosition(0);
+    Serial.println("--- System Initialized ---\n");
     
 }
 
@@ -155,12 +158,12 @@ while (Serial.available()) {
       Serial.print(" | J6: "); Serial.println(j6_angle);
 
       // Apply your motor movements
-      stepper1->moveTo(j1_angle * J1_STEPS_PER_DEG);
-      stepper2->moveTo(j2_angle * J2_STEPS_PER_DEG);
-      stepper3->moveTo(j3_angle * J3_STEPS_PER_DEG);
-      stepper4->moveTo(j4_angle * J4_STEPS_PER_DEG);
-      stepper5->moveTo(j5_angle * J5_STEPS_PER_DEG);
-      stepper6->moveTo(j6_angle * J6_STEPS_PER_DEG);
+      stepper1->moveTo(j1_angle * Constants::Config::J1_STEPS_PER_DEG);
+      stepper2->moveTo(j2_angle * Constants::Config::J2_STEPS_PER_DEG);
+      stepper3->moveTo(j3_angle * Constants::Config::J3_STEPS_PER_DEG);
+      stepper4->moveTo(j4_angle * Constants::Config::J4_STEPS_PER_DEG);
+      stepper5->moveTo(j5_angle * Constants::Config::J5_STEPS_PER_DEG);
+      stepper6->moveTo(j6_angle * Constants::Config::J6_STEPS_PER_DEG);
     }
 
     // Clear the string for the next command
