@@ -1,10 +1,12 @@
 #include <Arduino.h>
-#include "FastAccelStepper.h"
-#include "TMCStepper.h"
-#include "motor_init.h"
+#include <FastAccelStepper.h>
+#include <TMCStepper.h>
+#include <motor_init.h>
 #include <math.h>
 #include <ArduinoEigen.h>
-#include "homing_sequence.h"
+#include <homing_sequence.h>
+#include <kinematics.h>
+#include <BasicLinearAlgebra.h>
 
 // ================= UART PINS =================
 #define TMC_RX 15
@@ -15,6 +17,10 @@
 #define SERIAL_PORT1 Serial1
 #define SERIAL_PORT2 Serial2
 
+Joints joints;
+Pose FK_result_container;
+void test();
+void test2();
 
 void setup()
 {   
@@ -33,7 +39,7 @@ void setup()
 
     engine.init();
     stepper1 = engine.stepperConnectToPin(Constants::Pins::J1_STEP_PIN);
-    stepper1->setDirectionPin(Constants::Pins::J1_DIR_PIN, true);
+    stepper1->setDirectionPin(Constants::Pins::J1_DIR_PIN, false);
     stepper1->setAutoEnable(true);
     stepper1->setSpeedInHz(10000);      // steps/sec
     stepper1->setAcceleration(6000);     // steps/sec^2
@@ -53,13 +59,13 @@ void setup()
     stepper3->setAcceleration(6000);     // steps/sec^2
 
     stepper4 = engine.stepperConnectToPin(Constants::Pins::J4_STEP_PIN);
-    stepper4->setDirectionPin(Constants::Pins::J4_DIR_PIN, true);
+    stepper4->setDirectionPin(Constants::Pins::J4_DIR_PIN, false);
     stepper4->setAutoEnable(true);
     stepper4->setSpeedInHz(10000);      // steps/sec
     stepper4->setAcceleration(6000);     // steps/sec^2
 
     stepper5 = engine.stepperConnectToPin(Constants::Pins::J5_STEP_PIN);
-    stepper5->setDirectionPin(Constants::Pins::J5_DIR_PIN, true);
+    stepper5->setDirectionPin(Constants::Pins::J5_DIR_PIN, false);
     stepper5->setAutoEnable(true);
     stepper5->setSpeedInHz(10000);      // steps/sec
     stepper5->setAcceleration(6000);     // steps/sec^2  
@@ -72,12 +78,12 @@ void setup()
 
 
 
-    homeAxis(1);
-    homeAxis(2);
-    homeAxis(3);
-    homeAxis(4);
-    homeAxis(5);
-    delay(100);
+    // homeAxis(1);
+    // homeAxis(2);
+    // homeAxis(3);
+    // homeAxis(4);
+    // homeAxis(5);
+    // delay(2000);
     stepper1->setCurrentPosition(0);
     stepper2->setCurrentPosition(0);
     stepper3->setCurrentPosition(0);
@@ -85,6 +91,7 @@ void setup()
     stepper5->setCurrentPosition(0);
     stepper6->setCurrentPosition(0);
     Serial.println("--- System Initialized ---\n");
+
     
 }
 
@@ -98,12 +105,7 @@ float j4_angle = 0;
 float j5_angle = 0;
 float j6_angle = 0;
 
-// Joint limits
-const float J1_MIN = 0;
-const float J1_MAX = 360;
 
-const float J2_MIN = 0;
-const float J2_MAX = 360;
 void loop() {
 while (Serial.available()) {
   char c = Serial.read();
@@ -148,7 +150,7 @@ while (Serial.available()) {
       j4_angle = angles[3];
       j5_angle = angles[4];
       j6_angle = angles[5];
-
+      Serial.println(" ----------------------------------- ");
       // Debug Print
       Serial.print("Parsed Angles -> J1: "); Serial.print(j1_angle);
       Serial.print(" | J2: "); Serial.print(j2_angle);
@@ -156,6 +158,16 @@ while (Serial.available()) {
       Serial.print(" | J4: "); Serial.print(j4_angle);
       Serial.print(" | J5: "); Serial.print(j5_angle);
       Serial.print(" | J6: "); Serial.println(j6_angle);
+      Serial.println(" ----------------------------------- ");
+
+      joints.q1 = j1_angle;
+      joints.q2 = j2_angle;
+      joints.q3 = j3_angle;
+      joints.q4 = j4_angle;
+      joints.q5 = j5_angle;
+      joints.q6 = j6_angle;
+      test();
+      test2();
 
       // Apply your motor movements
       stepper1->moveTo(j1_angle * Constants::Config::J1_STEPS_PER_DEG);
@@ -179,3 +191,87 @@ while (Serial.available()) {
 
 
 
+void test(){
+Serial.println(" ----------------------------------- ");
+
+  degToRad(joints);
+
+
+  // 2. BENCHMARK
+  auto start_time = micros();
+  calculateForwardKinematics(joints, FK_result_container);
+  auto end_time = micros();
+  
+
+  float avg_time = (float)(end_time - start_time);
+  
+  Serial.printf("Real avg execution time = %.3f us\n", avg_time);
+
+  // Print results to ensure 'res' is actually used
+  Serial.println("FK result:");
+  printPose(FK_result_container);
+  Serial.println(" ");
+
+Serial.println(" ----------------------------------- ");
+}
+
+
+
+
+
+void test2()
+{
+
+  Serial.println(" ----------------------------------- ");
+  Serial.println(" ");
+  Serial.println(" ");
+
+  BLA::Matrix<6,6> J;
+  BLA::Matrix<6,6> J_copy;
+  degToRad(joints);
+
+  auto start_time = micros();
+  fillJacobian(joints, J);
+  J_copy = J; // Make a copy of J to ensure it's used in subsequent operations
+  auto end_time = micros();
+  float avg_time = (float)(end_time - start_time);
+
+  Serial.printf("Jacobian filling execution time = %.3f us\n", avg_time);
+
+  Serial.println("Jacobian Matrix:");
+  J.printTo(Serial);
+  Serial.println(" ");
+  Serial.println(" ");
+
+
+  start_time = micros();
+  bool is_non_singular = BLA::Invert(J);
+  end_time = micros();
+  avg_time = (float)(end_time - start_time);
+  Serial.printf("Jacobian inversion execution time = %.3f us\n", avg_time);
+
+  if(!is_non_singular) {
+    Serial.println("Warning: Jacobian is singular and cannot be inverted.");
+  } else {
+    Serial.println("Jacobian Matrix successfully inverted.");
+    J.printTo(Serial);
+  }
+
+  Serial.println(" ");
+  Serial.println(" ");
+
+  start_time = micros();
+  auto res2 = BLA::MatrixTranspose(J_copy);
+  end_time = micros();
+  avg_time = (float)(end_time - start_time);
+  Serial.printf("Jacobian transpose execution time = %.3f us\n", avg_time);
+
+
+  res2.printTo(Serial);
+
+
+  Serial.println(" ");
+  Serial.println(" ");
+  // Serial.println(J);
+  Serial.println(" ----------------------------------- ");
+}
