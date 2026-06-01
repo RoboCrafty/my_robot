@@ -1,27 +1,19 @@
 #pragma once
 #include <Arduino.h>
 #include <BasicLinearAlgebra.h>
+#include <helper_functions.h>
+#include <structs.h>
 
-struct Joints {
-    float q1, q2, q3, q4, q5, q6;
-};
 
-struct Pose {
-    float x, y, z, rx, ry, rz;
-};
-
-inline Pose extract_pose_from_transformation_matrix(const BLA::Matrix<4,4, float>& T0_ee);
 /**
  * Calculates the forward kinematics transformation matrix.
  * @param q Array of 6 joint angles (q1 to q6 in radians) passed via the Joints struct
  * @return 4x4 Homogeneous Transformation Matrix
  */
-inline void IRAM_ATTR calculateForwardKinematics(const Joints& q, Pose& result) {
+inline void IRAM_ATTR getFK(BLA::Matrix<6, 1, float>& q, Pose& result, BLA::Matrix<4,4, float>& T0_ee_result) {
     // 1. Unpack q array for readability (using 0-based indexing)
-    float q1 = q.q1, q2 = q.q2, q3 = q.q3, q4 = q.q4, q5 = q.q5, q6 = q.q6;
+    float q1 = q(0, 0), q2 = q(1, 0), q3 = q(2, 0), q4 = q(3, 0), q5 = q(4, 0), q6 = q(5, 0);
 
-
-    BLA::Matrix<4,4, float> T0_ee_result;
     T0_ee_result.Fill(0.0f);
     T0_ee_result(0, 0) = cos(q6)*(cos(q1)*cos(q4)+sin(q4)*(cos(q2)*sin(q1)*sin(q3)+cos(q3)*sin(q1)*sin(q2)))-sin(q6)*(cos(q5)*(cos(q1)*sin(q4)-cos(q4)*(cos(q2)*sin(q1)*sin(q3)+cos(q3)*sin(q1)*sin(q2)))+sin(q5)*(sin(q1)*sin(q2)*sin(q3)-cos(q2)*cos(q3)*sin(q1)));
     T0_ee_result(0, 1) = -sin(q6)*(cos(q1)*cos(q4)+sin(q4)*(cos(q2)*sin(q1)*sin(q3)+cos(q3)*sin(q1)*sin(q2)))-cos(q6)*(cos(q5)*(cos(q1)*sin(q4)-cos(q4)*(cos(q2)*sin(q1)*sin(q3)+cos(q3)*sin(q1)*sin(q2)))+sin(q5)*(sin(q1)*sin(q2)*sin(q3)-cos(q2)*cos(q3)*sin(q1)));
@@ -36,7 +28,6 @@ inline void IRAM_ATTR calculateForwardKinematics(const Joints& q, Pose& result) 
     T0_ee_result(2, 2) = -sin(q5)*(sin(q1)*sin(q4)+cos(q4)*(cos(q1)*cos(q2)*sin(q3)+cos(q1)*cos(q3)*sin(q2)))+cos(q5)*(cos(q1)*cos(q2)*cos(q3)-cos(q1)*sin(q2)*sin(q3));
     T0_ee_result(2, 3) = cos(q1)*2.342E-2+cos(q1)*sin(q2)*(9.0/5.0E+1)-(sin(q1)*sin(q4)*sin(q5))/1.0E+1+(cos(q2+q3)*cos(q1)*cos(q5))/1.0E+1+cos(q1)*cos(q2)*cos(q3)*1.7635E-1+cos(q1)*cos(q2)*sin(q3)*4.35E-2+cos(q1)*cos(q3)*sin(q2)*4.35E-2-cos(q1)*sin(q2)*sin(q3)*1.7635E-1-(cos(q1)*cos(q2)*cos(q4)*sin(q3)*sin(q5))/1.0E+1-(cos(q1)*cos(q3)*cos(q4)*sin(q2)*sin(q5))/1.0E+1;
     T0_ee_result(3, 3) = 1.0;
-
     result = extract_pose_from_transformation_matrix(T0_ee_result);
 }
 
@@ -46,109 +37,113 @@ inline void IRAM_ATTR calculateForwardKinematics(const Joints& q, Pose& result) 
  * @param q Array of 6 joint angles (q1 to q6 in radians) passed via the Joints struct
  * @return Doesn't return anything, but modifies the Jacobian_result matrix
  */
-inline void IRAM_ATTR fillJacobian(const Joints& joints, BLA::Matrix<6,6, float>& Jacobian_result)
+inline void IRAM_ATTR fillJacobian(BLA::Matrix<6, 1, float>& joints, BLA::Matrix<6,6, float>& Jacobian_result)
 {
-    float q1 = joints.q1, q2 = joints.q2, q3 = joints.q3, q4 = joints.q4, q5 = joints.q5, q6 = joints.q6;
+    float q1 = joints(0, 0), q2 = joints(1, 0), q3 = joints(2, 0), q4 = joints(3, 0), q5 = joints(4, 0), q6 = joints(5, 0);
 
     Jacobian_result.Fill(0.0f);
-    Jacobian_result(0, 0) = cosf(q2+q3)*(-4.35E-2f)+sinf(q2+q3)*1.7635E-1f-cosf(q2)*(9.0f/5.0E+1f)-(sinf(q4-q5)*cosf(q2+q3))/2.0E+1f+(cosf(q2+q3)*sinf(q4+q5))/2.0E+1f+(sinf(q2+q3)*cosf(q5))/1.0E+1f-1.105E-1f;
-    Jacobian_result(0, 1) = cosf(q1)*2.342E-2f+cosf(q1)*sinf(q2)*(9.0f/5.0E+1f)-(sinf(q1)*sinf(q4)*sinf(q5))/1.0E+1f+(cosf(q2+q3)*cosf(q1)*cosf(q5))/1.0E+1f+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1f+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2f+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2f-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1f-(cosf(q1)*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1f-(cosf(q1)*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1f;
-    Jacobian_result(0, 2) = sinf(q1)*(cosf(q2+q3)*4.35E-2f-sinf(q2+q3)*1.7635E-1f+cosf(q2)*(9.0f/5.0E+1f)+(sinf(q4-q5)*cosf(q2+q3))/2.0E+1f-(cosf(q2+q3)*sinf(q4+q5))/2.0E+1f-(sinf(q2+q3)*cosf(q5))/1.0E+1f);
-    Jacobian_result(0, 3) = sinf(q1)*(cosf(q2+q3)*-8.7E+2f+sinf(q2+q3)*3.527E+3f+sinf(q2+q3)*cosf(q5)*2.0E+3f+cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+3f)*(-5.0E-5f);
-    Jacobian_result(0, 4) = (sinf(q5)*(cosf(q1)*cosf(q4)+cosf(q2)*sinf(q1)*sinf(q3)*sinf(q4)+cosf(q3)*sinf(q1)*sinf(q2)*sinf(q4)))/1.0E+1f;
-    Jacobian_result(0, 5) = (cosf(q1)*cosf(q5)*sinf(q4))/1.0E+1f-(cosf(q2)*cosf(q3)*sinf(q1)*sinf(q5))/1.0E+1f+(sinf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+1f-(cosf(q2)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q3))/1.0E+1f-(cosf(q3)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q2))/1.0E+1f;
-    Jacobian_result(1, 0) = sinf(q1)*2.342E-2f+sinf(q1)*sinf(q2)*(9.0f/5.0E+1f)-sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1f+(cosf(q2+q3)*cosf(q5)*sinf(q1))/1.0E+1f+cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1f+cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2f+cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2f+(cosf(q1)*sinf(q4)*sinf(q5))/1.0E+1f-(cosf(q2)*cosf(q4)*sinf(q1)*sinf(q3)*sinf(q5))/1.0E+1f-(cosf(q3)*cosf(q4)*sinf(q1)*sinf(q2)*sinf(q5))/1.0E+1f;
-    Jacobian_result(1, 2) = sinf(q2)*(-9.0f/5.0E+1f)-cosf(q2)*cosf(q3)*1.7635E-1f-cosf(q2)*sinf(q3)*4.35E-2f-cosf(q3)*sinf(q2)*4.35E-2f+sinf(q2)*sinf(q3)*1.7635E-1f-(cosf(q2)*cosf(q3)*cosf(q5))/1.0E+1f+(cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1f+(cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1f+(cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1f;
-    Jacobian_result(1, 3) = cosf(q2)*cosf(q3)*(-1.7635E-1f)-cosf(q2)*sinf(q3)*4.35E-2f-cosf(q3)*sinf(q2)*4.35E-2f+sinf(q2)*sinf(q3)*1.7635E-1f-(cosf(q2)*cosf(q3)*cosf(q5))/1.0E+1f+(cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1f+(cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1f+(cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1f;
-    Jacobian_result(1, 4) = (cosf(q2+q3)*sinf(q4)*sinf(q5))/1.0E+1f;
-    Jacobian_result(1, 5) = (cosf(q2)*sinf(q3)*sinf(q5))/1.0E+1f+(cosf(q3)*sinf(q2)*sinf(q5))/1.0E+1f-(cosf(q2)*cosf(q3)*cosf(q4)*cosf(q5))/1.0E+1f+(cosf(q4)*cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1f;
-    Jacobian_result(2, 1) = sinf(q1)*(-2.342E-2f)-sinf(q1)*sinf(q2)*(9.0f/5.0E+1f)+sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1f-(cosf(q2+q3)*cosf(q5)*sinf(q1))/1.0E+1f-cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1f-cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2f-cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2f-(cosf(q1)*sinf(q4)*sinf(q5))/1.0E+1f+(cosf(q2)*cosf(q4)*sinf(q1)*sinf(q3)*sinf(q5))/1.0E+1f+(cosf(q3)*cosf(q4)*sinf(q1)*sinf(q2)*sinf(q5))/1.0E+1f;
-    Jacobian_result(2, 2) = cosf(q1)*(cosf(q2+q3)*4.35E-2f-sinf(q2+q3)*1.7635E-1f+cosf(q2)*(9.0f/5.0E+1f)+(sinf(q4-q5)*cosf(q2+q3))/2.0E+1f-(cosf(q2+q3)*sinf(q4+q5))/2.0E+1f-(sinf(q2+q3)*cosf(q5))/1.0E+1f);
-    Jacobian_result(2, 3) = cosf(q1)*(cosf(q2+q3)*-8.7E+2f+sinf(q2+q3)*3.527E+3f+sinf(q2+q3)*cosf(q5)*2.0E+3f+cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+3f)*(-5.0E-5f);
-    Jacobian_result(2, 4) = (sinf(q5)*(-cosf(q4)*sinf(q1)+cosf(q1)*cosf(q2)*sinf(q3)*sinf(q4)+cosf(q1)*cosf(q3)*sinf(q2)*sinf(q4)))/1.0E+1f;
-    Jacobian_result(2, 5) = cosf(q5)*sinf(q1)*sinf(q4)*(-1.0f/1.0E+1f)-(cosf(q1)*cosf(q2)*cosf(q3)*sinf(q5))/1.0E+1f+(cosf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+1f-(cosf(q1)*cosf(q2)*cosf(q4)*cosf(q5)*sinf(q3))/1.0E+1f-(cosf(q1)*cosf(q3)*cosf(q4)*cosf(q5)*sinf(q2))/1.0E+1f;
+    Jacobian_result(0, 0) = cosf(q1)*2.342E-2+cosf(q1)*sinf(q2)*(9.0/5.0E+1)-(sinf(q1)*sinf(q4)*sinf(q5))/1.0E+1+(cosf(q2+q3)*cosf(q1)*cosf(q5))/1.0E+1+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-(cosf(q1)*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1-(cosf(q1)*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1;
+    Jacobian_result(0, 1) = sinf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)+(sinf(q4-q5)*cosf(q2+q3))/2.0E+1-(cosf(q2+q3)*sinf(q4+q5))/2.0E+1-(sinf(q2+q3)*cosf(q5))/1.0E+1);
+    Jacobian_result(0, 2) = sinf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+sinf(q2+q3)*cosf(q5)*2.0E+3+cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+3)*(-5.0E-5);
+    Jacobian_result(0, 3) = (sinf(q5)*(cosf(q1)*cosf(q4)+cosf(q2)*sinf(q1)*sinf(q3)*sinf(q4)+cosf(q3)*sinf(q1)*sinf(q2)*sinf(q4)))/1.0E+1;
+    Jacobian_result(0, 4) = (cosf(q1)*cosf(q5)*sinf(q4))/1.0E+1-(cosf(q2)*cosf(q3)*sinf(q1)*sinf(q5))/1.0E+1+(sinf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+1-(cosf(q2)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q3))/1.0E+1-(cosf(q3)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q2))/1.0E+1;
+    Jacobian_result(1, 1) = sinf(q2)*(-9.0/5.0E+1)-cosf(q2)*cosf(q3)*1.7635E-1-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-(cosf(q2)*cosf(q3)*cosf(q5))/1.0E+1+(cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1+(cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1+(cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1;
+    Jacobian_result(1, 2) = cosf(q2)*cosf(q3)*(-1.7635E-1)-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-(cosf(q2)*cosf(q3)*cosf(q5))/1.0E+1+(cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1+(cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+1+(cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+1;
+    Jacobian_result(1, 3) = (cosf(q2+q3)*sinf(q4)*sinf(q5))/1.0E+1;
+    Jacobian_result(1, 4) = (cosf(q2)*sinf(q3)*sinf(q5))/1.0E+1+(cosf(q3)*sinf(q2)*sinf(q5))/1.0E+1-(cosf(q2)*cosf(q3)*cosf(q4)*cosf(q5))/1.0E+1+(cosf(q4)*cosf(q5)*sinf(q2)*sinf(q3))/1.0E+1;
+    Jacobian_result(2, 0) = sinf(q1)*(-2.342E-2)-sinf(q1)*sinf(q2)*(9.0/5.0E+1)+sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-(cosf(q2+q3)*cosf(q5)*sinf(q1))/1.0E+1-cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1-cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2-(cosf(q1)*sinf(q4)*sinf(q5))/1.0E+1+(cosf(q2)*cosf(q4)*sinf(q1)*sinf(q3)*sinf(q5))/1.0E+1+(cosf(q3)*cosf(q4)*sinf(q1)*sinf(q2)*sinf(q5))/1.0E+1;
+    Jacobian_result(2, 1) = cosf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)+(sinf(q4-q5)*cosf(q2+q3))/2.0E+1-(cosf(q2+q3)*sinf(q4+q5))/2.0E+1-(sinf(q2+q3)*cosf(q5))/1.0E+1);
+    Jacobian_result(2, 2) = cosf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+sinf(q2+q3)*cosf(q5)*2.0E+3+cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+3)*(-5.0E-5);
+    Jacobian_result(2, 3) = (sinf(q5)*(-cosf(q4)*sinf(q1)+cosf(q1)*cosf(q2)*sinf(q3)*sinf(q4)+cosf(q1)*cosf(q3)*sinf(q2)*sinf(q4)))/1.0E+1;
+    Jacobian_result(2, 4) = cosf(q5)*sinf(q1)*sinf(q4)*(-1.0/1.0E+1)-(cosf(q1)*cosf(q2)*cosf(q3)*sinf(q5))/1.0E+1+(cosf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+1-(cosf(q1)*cosf(q2)*cosf(q4)*cosf(q5)*sinf(q3))/1.0E+1-(cosf(q1)*cosf(q3)*cosf(q4)*cosf(q5)*sinf(q2))/1.0E+1;
+    Jacobian_result(3, 1) = cosf(q1);
     Jacobian_result(3, 2) = cosf(q1);
-    Jacobian_result(3, 3) = cosf(q1);
-    Jacobian_result(3, 4) = cosf(q2+q3)*sinf(q1);
-    Jacobian_result(3, 5) = cosf(q1)*cosf(q4)+sinf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2));
-    Jacobian_result(4, 1) = 1.0f;
-    Jacobian_result(4, 4) = -sinf(q2+q3);
-    Jacobian_result(4, 5) = cosf(q2+q3)*sinf(q4);
-    Jacobian_result(5, 0) = 1.0f;
+    Jacobian_result(3, 3) = cosf(q2+q3)*sinf(q1);
+    Jacobian_result(3, 4) = cosf(q1)*cosf(q4)+sinf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2));
+    Jacobian_result(3, 5) = sinf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-cosf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1));
+    Jacobian_result(4, 0) = 1.0;
+    Jacobian_result(4, 3) = -sinf(q2+q3);
+    Jacobian_result(4, 4) = cosf(q2+q3)*sinf(q4);
+    Jacobian_result(4, 5) = -sinf(q2+q3)*cosf(q5)-cosf(q2+q3)*cosf(q4)*sinf(q5);
+    Jacobian_result(5, 1) = -sinf(q1);
     Jacobian_result(5, 2) = -sinf(q1);
-    Jacobian_result(5, 3) = -sinf(q1);
-    Jacobian_result(5, 4) = cosf(q2+q3)*cosf(q1);
-    Jacobian_result(5, 5) = -cosf(q4)*sinf(q1)+sinf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2));
+    Jacobian_result(5, 3) = cosf(q2+q3)*cosf(q1);
+    Jacobian_result(5, 4) = -cosf(q4)*sinf(q1)+sinf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2));
+    Jacobian_result(5, 5) = -sinf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+cosf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3));
 }
 
-
-inline void degToRad(Joints& j) 
+inline BLA::Matrix<6, 1, float> getIK(BLA::Matrix<6, 1, float>& current_joint_config, const Pose* target_pose, int& itr_counter)
 {
-    j.q1 = j.q1 * (M_PI / 180.0f);
-    j.q2 = j.q2 * (M_PI / 180.0f);
-    j.q3 = j.q3 * (M_PI / 180.0f);
-    j.q4 = j.q4 * (M_PI / 180.0f);
-    j.q5 = j.q5 * (M_PI / 180.0f);
-    j.q6 = j.q6 * (M_PI / 180.0f);
-}
-inline float radToDeg(float rad_angle) 
-{
-    float result = rad_angle * (180.0f / M_PI);
-    return result;
-}
-
-inline Joints getIK(const Joints current_joint_config, const Pose* target_pose, int& itr_counter)
-{
-    
+    float dampening_factor = 0.05f; // Adjust as needed for stability
+    float step_size = 0.05f; // Adjust as needed for convergence speed
     Pose current_pose;
+    Pose FK_result_container;
     Joints result;
-    calculateForwardKinematics(current_joint_config, current_pose);
+    BLA::Matrix<6, 1, float> error;
+    BLA::Matrix<6, 1, float> delta_q;
+    BLA::Matrix<4, 4, float> T0_ee;
+    BLA::Matrix<3, 3, float> current_rot_matrix;
+    BLA::Matrix<3, 3, float> target_rot_matrix;
+    BLA::Matrix<3, 3, float> rotation_err;
+    BLA::Matrix<3, 1, float> angular_error;
+    BLA::Matrix<6, 6, float> J_dampened_least_squares;
+    BLA::Matrix<6, 6, float> I;
+    I.Fill(0);
+    I(0,0) = 1.0f; I(1,1) = 1.0f; I(2,2) = 1.0f; I(3,3) = 1.0f; I(4,4) = 1.0f; I(5,5) = 1.0f;
+    itr_counter = 0;
+    error.Fill(1.0f);
 
-    return result;
+
+    while (BLA::Norm(error) > 1e-3f && itr_counter < 50)
+    {
+        // Serial.print("Iteration: ");Serial.println(itr_counter);
+        itr_counter++;
+
+        getFK(current_joint_config, current_pose, T0_ee);
+
+        error(0) = target_pose->x - current_pose.x;
+        error(1) = target_pose->y - current_pose.y;
+        error(2) = target_pose->z - current_pose.z;
+        
+        current_rot_matrix = T0_ee.Submatrix<3,3>(0,0);
+        target_rot_matrix = getRotationMatrix(target_pose->rx, target_pose->ry, target_pose->rz);
+        rotation_err = target_rot_matrix * BLA::MatrixTranspose(current_rot_matrix);
+
+        // Extract the [dRx, dRy, dRz] vector
+        angular_error = getAxisAngleError(rotation_err);
+        error(3) = angular_error(0);
+        error(4) = angular_error(1);
+        error(5) = angular_error(2);
+
+
+        BLA::Matrix<6, 6, float> Jacobian;
+        fillJacobian(current_joint_config, Jacobian);
+        auto tmp = (Jacobian * BLA::MatrixTranspose(Jacobian) + dampening_factor*dampening_factor * I);
+        J_dampened_least_squares = BLA::MatrixTranspose(Jacobian) * BLA::Inverse(tmp);
+
+        delta_q = J_dampened_least_squares * error;
+
+        float max_step = 0.1f; // Max ~2.8 degrees per step
+        for (int j = 0; j < 6; j++) {
+            if (delta_q(j, 0) > max_step) delta_q(j, 0) = max_step;
+            if (delta_q(j, 0) < -max_step) delta_q(j, 0) = -max_step;
+        }
+        current_joint_config += delta_q;
+        // radToDeg(current_joint_config);
+        // Serial.print("[");
+        // for(int j=0; j<6; j++){
+        //     Serial.print(current_joint_config(j, 0) * (180.0f / PI)); 
+        //     if(j < 5) Serial.print(", ");
+        // }
+        // Serial.println("]");
+        // Serial.println(" ");
+    }
+        // getFK(current_joint_config, FK_result_container, T0_ee);
+        // Serial.println("FK result:");
+        // printPose(FK_result_container);
+        // Serial.println(" ");
+        radToDeg(current_joint_config);
+    return current_joint_config;
 
 }
 
-
-inline Pose IRAM_ATTR extract_pose_from_transformation_matrix(const BLA::Matrix<4,4, float>& T0_ee)
-{
-    Pose result;
-    result.x   = T0_ee(0,3);
-    result.y   = T0_ee(1,3);
-    result.z   = T0_ee(2,3);
-    float r11 = T0_ee(0,0), r12 = T0_ee(0,1), r13 = T0_ee(0,2);
-    float r21 = T0_ee(1,0), r22 = T0_ee(1,1), r23 = T0_ee(1,2);
-    float r31 = T0_ee(2,0), r32 = T0_ee(2,1), r33 = T0_ee(2,2);
-
-    // float pitch = asin(-r31);
-    float roll = atan2(r32, r33);
-    float pitch = atan2(-r31, sqrt(r32*r32 + r33*r33)); // More numerically stable than asin(-r31)
-    float yaw  = atan2(r21, r11);
-
-    result.rx = roll;
-    result.ry = pitch;
-    result.rz = yaw;
-    
-    // else
-    // {
-    //     // gimbal lock case
-    //     float yaw = atan2(-r12, r22);
-
-    //     result.rx = 0.0f;
-    //     result.ry = pitch;
-    //     result.rz = yaw;
-    // }
-
-    return result;
-}   
-
-
-inline void IRAM_ATTR printPose(const Pose& p)
-{
-    Serial.print("x: ");    Serial.print(p.x);
-    Serial.print(" | y: "); Serial.print(p.y);
-    Serial.print(" | z: "); Serial.print(p.z);
-
-    Serial.print(" | rx: "); Serial.print(radToDeg(p.rx));
-    Serial.print(" | ry: "); Serial.print(radToDeg(p.ry));
-    Serial.print(" | rz: "); Serial.println(radToDeg(p.rz));
-}
