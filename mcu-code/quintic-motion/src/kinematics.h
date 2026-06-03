@@ -4,7 +4,7 @@
 #include <helper_functions.h>
 #include <structs.h>
 
-
+float ez = 0.089f; // End-effector length in meters
 /**
  * Calculates the forward kinematics transformation matrix.
  * @param q Array of 6 joint angles (q1 to q6 in radians) passed via the Joints struct
@@ -18,15 +18,15 @@ inline void IRAM_ATTR getFK(BLA::Matrix<6, 1, float>& q, Pose& result, BLA::Matr
     T0_ee_result(0, 0) = cosf(q6)*(cosf(q1)*cosf(q4)+sinf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-sinf(q6)*(cosf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))+sinf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1)));
     T0_ee_result(0, 1) = -sinf(q6)*(cosf(q1)*cosf(q4)+sinf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-cosf(q6)*(cosf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))+sinf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1)));
     T0_ee_result(0, 2) = sinf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-cosf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1));
-    T0_ee_result(0, 3) = sinf(q1)*2.342E-2+sinf(q1)*sinf(q2)*(9.0/5.0E+1)-sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1+cosf(q2+q3)*cosf(q5)*sinf(q1)*(8.9E+1/1.0E+3)+cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1+cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2+cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2+cosf(q1)*sinf(q4)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q2)*cosf(q4)*sinf(q1)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q3)*cosf(q4)*sinf(q1)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
+    T0_ee_result(0, 3) = sinf(q1)*2.342E-2+sinf(q1)*sinf(q2)*(9.0/5.0E+1)+(ez*(sinf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-cosf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1))))/1.0E+3-sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1+cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1+cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2+cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2;
     T0_ee_result(1, 0) = -sinf(q6)*(sinf(q2+q3)*sinf(q5)-cosf(q2+q3)*cosf(q4)*cosf(q5))+cosf(q2+q3)*cosf(q6)*sinf(q4);
     T0_ee_result(1, 1) = -cosf(q6)*(sinf(q2+q3)*sinf(q5)-cosf(q2+q3)*cosf(q4)*cosf(q5))-cosf(q2+q3)*sinf(q4)*sinf(q6);
     T0_ee_result(1, 2) = -sinf(q2+q3)*cosf(q5)-cosf(q2+q3)*cosf(q4)*sinf(q5);
-    T0_ee_result(1, 3) = cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)+sinf(q4-q5)*cosf(q2+q3)*4.45E-2-cosf(q2+q3)*sinf(q4+q5)*4.45E-2-sinf(q2+q3)*cosf(q5)*(8.9E+1/1.0E+3)+1.105E-1;
+    T0_ee_result(1, 3) = cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)-(ez*cosf(q2+q3)*sinf(q4+q5))/2.0E+3-(ez*sinf(q2+q3)*cosf(q5))/1.0E+3+(ez*sinf(q4-q5)*cosf(q2+q3))/2.0E+3+1.105E-1;
     T0_ee_result(2, 0) = -cosf(q6)*(cosf(q4)*sinf(q1)-sinf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+sinf(q6)*(cosf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+sinf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3)));
     T0_ee_result(2, 1) = sinf(q6)*(cosf(q4)*sinf(q1)-sinf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+cosf(q6)*(cosf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+sinf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3)));
     T0_ee_result(2, 2) = -sinf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))+cosf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3));
-    T0_ee_result(2, 3) = cosf(q1)*2.342E-2+cosf(q1)*sinf(q2)*(9.0/5.0E+1)-sinf(q1)*sinf(q4)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q2+q3)*cosf(q1)*cosf(q5)*(8.9E+1/1.0E+3)+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-cosf(q1)*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q1)*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
+    T0_ee_result(2, 3) = cosf(q1)*2.342E-2+cosf(q1)*sinf(q2)*(9.0/5.0E+1)-(ez*(sinf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))-cosf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3))))/1.0E+3+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1;
     T0_ee_result(3, 3) = 1.0;
     result = extract_pose_from_transformation_matrix(T0_ee_result);
 }
@@ -42,20 +42,20 @@ inline void IRAM_ATTR fillJacobian(BLA::Matrix<6, 1, float>& joints, BLA::Matrix
     float q1 = joints(0, 0), q2 = joints(1, 0), q3 = joints(2, 0), q4 = joints(3, 0), q5 = joints(4, 0), q6 = joints(5, 0);
 
     Jacobian_result.Fill(0.0f);
-    Jacobian_result(0, 0) = cosf(q1)*2.342E-2+cosf(q1)*sinf(q2)*(9.0/5.0E+1)-sinf(q1)*sinf(q4)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q2+q3)*cosf(q1)*cosf(q5)*(8.9E+1/1.0E+3)+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-cosf(q1)*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q1)*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
-    Jacobian_result(0, 1) = sinf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)+sinf(q4-q5)*cosf(q2+q3)*4.45E-2-cosf(q2+q3)*sinf(q4+q5)*4.45E-2-sinf(q2+q3)*cosf(q5)*(8.9E+1/1.0E+3));
-    Jacobian_result(0, 2) = sinf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+sinf(q2+q3)*cosf(q5)*1.78E+3+cosf(q2+q3)*cosf(q4)*sinf(q5)*1.78E+3)*(-5.0E-5);
-    Jacobian_result(0, 3) = sinf(q5)*(cosf(q1)*cosf(q4)+cosf(q2)*sinf(q1)*sinf(q3)*sinf(q4)+cosf(q3)*sinf(q1)*sinf(q2)*sinf(q4))*(8.9E+1/1.0E+3);
-    Jacobian_result(0, 4) = cosf(q1)*cosf(q5)*sinf(q4)*(8.9E+1/1.0E+3)-cosf(q2)*cosf(q3)*sinf(q1)*sinf(q5)*(8.9E+1/1.0E+3)+sinf(q1)*sinf(q2)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q2)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q3)*(8.9E+1/1.0E+3)-cosf(q3)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q2)*(8.9E+1/1.0E+3);
-    Jacobian_result(1, 1) = sinf(q2)*(-9.0/5.0E+1)-cosf(q2)*cosf(q3)*1.7635E-1-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-cosf(q2)*cosf(q3)*cosf(q5)*(8.9E+1/1.0E+3)+cosf(q5)*sinf(q2)*sinf(q3)*(8.9E+1/1.0E+3)+cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
-    Jacobian_result(1, 2) = cosf(q2)*cosf(q3)*(-1.7635E-1)-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-cosf(q2)*cosf(q3)*cosf(q5)*(8.9E+1/1.0E+3)+cosf(q5)*sinf(q2)*sinf(q3)*(8.9E+1/1.0E+3)+cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
-    Jacobian_result(1, 3) = cosf(q2+q3)*sinf(q4)*sinf(q5)*(8.9E+1/1.0E+3);
-    Jacobian_result(1, 4) = cosf(q2)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q3)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q2)*cosf(q3)*cosf(q4)*cosf(q5)*(8.9E+1/1.0E+3)+cosf(q4)*cosf(q5)*sinf(q2)*sinf(q3)*(8.9E+1/1.0E+3);
-    Jacobian_result(2, 0) = sinf(q1)*(-2.342E-2)-sinf(q1)*sinf(q2)*(9.0/5.0E+1)+sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-cosf(q2+q3)*cosf(q5)*sinf(q1)*(8.9E+1/1.0E+3)-cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1-cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q4)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q2)*cosf(q4)*sinf(q1)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q3)*cosf(q4)*sinf(q1)*sinf(q2)*sinf(q5)*(8.9E+1/1.0E+3);
-    Jacobian_result(2, 1) = cosf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)+sinf(q4-q5)*cosf(q2+q3)*4.45E-2-cosf(q2+q3)*sinf(q4+q5)*4.45E-2-sinf(q2+q3)*cosf(q5)*(8.9E+1/1.0E+3));
-    Jacobian_result(2, 2) = cosf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+sinf(q2+q3)*cosf(q5)*1.78E+3+cosf(q2+q3)*cosf(q4)*sinf(q5)*1.78E+3)*(-5.0E-5);
-    Jacobian_result(2, 3) = sinf(q5)*(-cosf(q4)*sinf(q1)+cosf(q1)*cosf(q2)*sinf(q3)*sinf(q4)+cosf(q1)*cosf(q3)*sinf(q2)*sinf(q4))*(8.9E+1/1.0E+3);
-    Jacobian_result(2, 4) = cosf(q5)*sinf(q1)*sinf(q4)*(-8.9E+1/1.0E+3)-cosf(q1)*cosf(q2)*cosf(q3)*sinf(q5)*(8.9E+1/1.0E+3)+cosf(q1)*sinf(q2)*sinf(q3)*sinf(q5)*(8.9E+1/1.0E+3)-cosf(q1)*cosf(q2)*cosf(q4)*cosf(q5)*sinf(q3)*(8.9E+1/1.0E+3)-cosf(q1)*cosf(q3)*cosf(q4)*cosf(q5)*sinf(q2)*(8.9E+1/1.0E+3);
+    Jacobian_result(0, 0) = cosf(q1)*2.342E-2+cosf(q1)*sinf(q2)*(9.0/5.0E+1)-(ez*(sinf(q5)*(sinf(q1)*sinf(q4)+cosf(q4)*(cosf(q1)*cosf(q2)*sinf(q3)+cosf(q1)*cosf(q3)*sinf(q2)))-cosf(q5)*(cosf(q1)*cosf(q2)*cosf(q3)-cosf(q1)*sinf(q2)*sinf(q3))))/1.0E+3+cosf(q1)*cosf(q2)*cosf(q3)*1.7635E-1+cosf(q1)*cosf(q2)*sinf(q3)*4.35E-2+cosf(q1)*cosf(q3)*sinf(q2)*4.35E-2-cosf(q1)*sinf(q2)*sinf(q3)*1.7635E-1;
+    Jacobian_result(0, 1) = sinf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)-(ez*cosf(q2+q3)*sinf(q4+q5))/2.0E+3-(ez*sinf(q2+q3)*cosf(q5))/1.0E+3+(ez*sinf(q4-q5)*cosf(q2+q3))/2.0E+3);
+    Jacobian_result(0, 2) = sinf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+ez*sinf(q2+q3)*cosf(q5)*2.0E+1+ez*cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+1)*(-5.0E-5);
+    Jacobian_result(0, 3) = (ez*sinf(q5)*(cosf(q1)*cosf(q4)+cosf(q2)*sinf(q1)*sinf(q3)*sinf(q4)+cosf(q3)*sinf(q1)*sinf(q2)*sinf(q4)))/1.0E+3;
+    Jacobian_result(0, 4) = (ez*cosf(q1)*cosf(q5)*sinf(q4))/1.0E+3-(ez*cosf(q2)*cosf(q3)*sinf(q1)*sinf(q5))/1.0E+3+(ez*sinf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+3-(ez*cosf(q2)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q3))/1.0E+3-(ez*cosf(q3)*cosf(q4)*cosf(q5)*sinf(q1)*sinf(q2))/1.0E+3;
+    Jacobian_result(1, 1) = sinf(q2)*(-9.0/5.0E+1)-cosf(q2)*cosf(q3)*1.7635E-1-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-(ez*cosf(q2)*cosf(q3)*cosf(q5))/1.0E+3+(ez*cosf(q5)*sinf(q2)*sinf(q3))/1.0E+3+(ez*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+3+(ez*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+3;
+    Jacobian_result(1, 2) = cosf(q2)*cosf(q3)*(-1.7635E-1)-cosf(q2)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q2)*4.35E-2+sinf(q2)*sinf(q3)*1.7635E-1-(ez*cosf(q2)*cosf(q3)*cosf(q5))/1.0E+3+(ez*cosf(q5)*sinf(q2)*sinf(q3))/1.0E+3+(ez*cosf(q2)*cosf(q4)*sinf(q3)*sinf(q5))/1.0E+3+(ez*cosf(q3)*cosf(q4)*sinf(q2)*sinf(q5))/1.0E+3;
+    Jacobian_result(1, 3) = (ez*cosf(q2+q3)*sinf(q4)*sinf(q5))/1.0E+3;
+    Jacobian_result(1, 4) = (ez*cosf(q2)*sinf(q3)*sinf(q5))/1.0E+3+(ez*cosf(q3)*sinf(q2)*sinf(q5))/1.0E+3-(ez*cosf(q2)*cosf(q3)*cosf(q4)*cosf(q5))/1.0E+3+(ez*cosf(q4)*cosf(q5)*sinf(q2)*sinf(q3))/1.0E+3;
+    Jacobian_result(2, 0) = sinf(q1)*(-2.342E-2)-sinf(q1)*sinf(q2)*(9.0/5.0E+1)-(ez*(sinf(q5)*(cosf(q1)*sinf(q4)-cosf(q4)*(cosf(q2)*sinf(q1)*sinf(q3)+cosf(q3)*sinf(q1)*sinf(q2)))-cosf(q5)*(sinf(q1)*sinf(q2)*sinf(q3)-cosf(q2)*cosf(q3)*sinf(q1))))/1.0E+3+sinf(q1)*sinf(q2)*sinf(q3)*1.7635E-1-cosf(q2)*cosf(q3)*sinf(q1)*1.7635E-1-cosf(q2)*sinf(q1)*sinf(q3)*4.35E-2-cosf(q3)*sinf(q1)*sinf(q2)*4.35E-2;
+    Jacobian_result(2, 1) = cosf(q1)*(cosf(q2+q3)*4.35E-2-sinf(q2+q3)*1.7635E-1+cosf(q2)*(9.0/5.0E+1)-(ez*cosf(q2+q3)*sinf(q4+q5))/2.0E+3-(ez*sinf(q2+q3)*cosf(q5))/1.0E+3+(ez*sinf(q4-q5)*cosf(q2+q3))/2.0E+3);
+    Jacobian_result(2, 2) = cosf(q1)*(cosf(q2+q3)*-8.7E+2+sinf(q2+q3)*3.527E+3+ez*sinf(q2+q3)*cosf(q5)*2.0E+1+ez*cosf(q2+q3)*cosf(q4)*sinf(q5)*2.0E+1)*(-5.0E-5);
+    Jacobian_result(2, 3) = (ez*sinf(q5)*(-cosf(q4)*sinf(q1)+cosf(q1)*cosf(q2)*sinf(q3)*sinf(q4)+cosf(q1)*cosf(q3)*sinf(q2)*sinf(q4)))/1.0E+3;
+    Jacobian_result(2, 4) = ez*cosf(q5)*sinf(q1)*sinf(q4)*(-1.0/1.0E+3)-(ez*cosf(q1)*cosf(q2)*cosf(q3)*sinf(q5))/1.0E+3+(ez*cosf(q1)*sinf(q2)*sinf(q3)*sinf(q5))/1.0E+3-(ez*cosf(q1)*cosf(q2)*cosf(q4)*cosf(q5)*sinf(q3))/1.0E+3-(ez*cosf(q1)*cosf(q3)*cosf(q4)*cosf(q5)*sinf(q2))/1.0E+3;
     Jacobian_result(3, 1) = cosf(q1);
     Jacobian_result(3, 2) = cosf(q1);
     Jacobian_result(3, 3) = cosf(q2+q3)*sinf(q1);
