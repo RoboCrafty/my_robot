@@ -7,3 +7,8 @@ struct Joints {
 struct Pose {
     float x, y, z, rx, ry, rz;
 };
+
+struct TrigValues {
+    float s1, s2, s3, s4, s5, s6;
+    float c1, c2, c3, c4, c5, c6;
+};

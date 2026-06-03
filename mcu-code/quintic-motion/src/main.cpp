@@ -75,7 +75,7 @@ void setup()
     stepper5->setAcceleration(6000);     // steps/sec^2  
 
     stepper6 = engine.stepperConnectToPin(Constants::Pins::J6_STEP_PIN);
-    stepper6->setDirectionPin(Constants::Pins::J6_DIR_PIN, true);
+    stepper6->setDirectionPin(Constants::Pins::J6_DIR_PIN, false);
     stepper6->setAutoEnable(true);
     stepper6->setSpeedInHz(10000);      // steps/sec
     stepper6->setAcceleration(6000);     // steps/sec^2  
@@ -86,8 +86,9 @@ void setup()
     homeAxis(2);
     homeAxis(3);
     homeAxis(4);
+    homeAxis(6);
     homeAxis(5);
-    delay(2000); // Wait for homing to complete
+    delay(3000); // Wait for homing to complete
     stepper1->setCurrentPosition(0);
     stepper2->setCurrentPosition(0);
     stepper3->setCurrentPosition(0);
@@ -95,6 +96,19 @@ void setup()
     stepper5->setCurrentPosition(0);
     stepper6->setCurrentPosition(0);
     Serial.println("--- System Initialized ---\n");
+
+    stepper1->setSpeedInHz(15000);      // steps/sec
+    stepper1->setAcceleration(10000);     // steps/sec^2
+    stepper2->setSpeedInHz(15000);      // steps/sec
+    stepper2->setAcceleration(10000);     // steps/sec^2
+    stepper3->setSpeedInHz(15000);      // steps/sec  
+    stepper3->setAcceleration(10000);     // steps/sec^2
+    stepper4->setSpeedInHz(20000);      // steps/sec
+    stepper4->setAcceleration(20000);     // steps/sec^2
+    stepper5->setSpeedInHz(20000);      // steps/sec
+    stepper5->setAcceleration(25000);     // steps/sec^2
+    stepper6->setSpeedInHz(30000);      // steps/sec
+    stepper6->setAcceleration(40000);     // steps/sec^2
 
     
 }
@@ -220,7 +234,7 @@ Serial.println(" ----------------------------------- ");
 
   // 2. BENCHMARK
   auto start_time = micros();
-  getFK(joints, FK_result_container, T0_ee_result);
+  // getFK(joints, FK_result_container, T0_ee_result);
   auto end_time = micros();
   
 
@@ -252,7 +266,7 @@ void test2()
   degToRad(joints);
 
   auto start_time = micros();
-  fillJacobian(joints, J);
+  // fillJacobian(joints, J);
   J_copy = J; // Make a copy of J to ensure it's used in subsequent operations
   auto end_time = micros();
   float avg_time = (float)(end_time - start_time);
