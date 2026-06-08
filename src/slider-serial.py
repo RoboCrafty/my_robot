@@ -231,7 +231,7 @@ duration_slider.grid(row=0, column=0, padx=10)
 
 # How fast we send serial data
 freq_slider = tk.Scale(frame_controls, from_=1, to=60, resolution=1, orient='horizontal', length=380, label='Update Rate (Hz / Packets per Second)')
-freq_slider.set(5) 
+freq_slider.set(25) 
 freq_slider.grid(row=0, column=1, padx=10)
 
 btn_loop = tk.Button(frame_controls, text="Start Smooth Animation", font=("Helvetica", 12, "bold"), command=toggle_animation)

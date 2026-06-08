@@ -31,11 +31,11 @@ namespace Constants{
 
         // Homed position in degrees after homing sequence completes !! Positions are zerod after hominhg sequence, so these are relative to the homing switch trigger point and not final absolute positions !!
         constexpr int16_t J1_HOMED_POSITION = 25 * Constants::Config::J1_STEPS_PER_DEG; // Example: -25 degrees from the switch
-        constexpr int16_t J2_HOMED_POSITION = 47 * Constants::Config::J2_STEPS_PER_DEG;
+        constexpr int16_t J2_HOMED_POSITION = 52 * Constants::Config::J2_STEPS_PER_DEG;
         constexpr int16_t J3_HOMED_POSITION = -71 * Constants::Config::J3_STEPS_PER_DEG;
         constexpr int16_t J4_HOMED_POSITION = 143 * Constants::Config::J4_STEPS_PER_DEG;
         constexpr int16_t J5_HOMED_POSITION = -125 * Constants::Config::J5_STEPS_PER_DEG;
-        constexpr int16_t J6_HOMED_POSITION = 180 * Constants::Config::J6_STEPS_PER_DEG;
+        constexpr int16_t J6_HOMED_POSITION = 190 * Constants::Config::J6_STEPS_PER_DEG;
     }
     
 

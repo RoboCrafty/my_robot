@@ -19,6 +19,7 @@
 #define SERIAL_PORT2 Serial2
 
 BLA::Matrix<6, 1, float> joints;
+BLA::Matrix<6, 1, float> joints2;
 Pose FK_result_container;
 Pose targetPose;
 BLA::Matrix<6, 1, float> IK_result_container;
@@ -178,19 +179,19 @@ void loop() {
 
         Serial.println(" ----------------------------------- ");
         // Debug Print
-        Serial.print("Angles -> J1: "); Serial.print(j1_angle);
-        Serial.print(" | J2: "); Serial.print(j2_angle);
-        Serial.print(" | J3: "); Serial.print(j3_angle);
-        Serial.print(" | J4: "); Serial.print(j4_angle);
-        Serial.print(" | J5: "); Serial.print(j5_angle);
-        Serial.print(" | J6: "); Serial.println(j6_angle);
+        Serial.print("Angles -> J1: "); Serial.print(j1_angle, 5);
+        Serial.print(" | J2: "); Serial.print(j2_angle, 5);
+        Serial.print(" | J3: "); Serial.print(j3_angle, 5);
+        Serial.print(" | J4: "); Serial.print(j4_angle, 5);
+        Serial.print(" | J5: "); Serial.print(j5_angle, 5);
+        Serial.print(" | J6: "); Serial.println(j6_angle, 5);
         
-        Serial.print("Pose   -> X: "); Serial.print(targetPose.x);
-        Serial.print(" | Y: "); Serial.print(targetPose.y);
-        Serial.print(" | Z: "); Serial.print(targetPose.z);
-        Serial.print(" | Rx: "); Serial.print(targetPose.rx);
-        Serial.print(" | Ry: "); Serial.print(targetPose.ry);
-        Serial.print(" | Rz: "); Serial.println(targetPose.rz);
+        Serial.print("Pose   -> X: "); Serial.print(targetPose.x, 5);
+        Serial.print(" | Y: "); Serial.print(targetPose.y, 5);
+        Serial.print(" | Z: "); Serial.print(targetPose.z, 5);
+        Serial.print(" | Rx: "); Serial.print(targetPose.rx, 5);
+        Serial.print(" | Ry: "); Serial.print(targetPose.ry, 5);
+        Serial.print(" | Rz: "); Serial.println(targetPose.rz, 5);
         Serial.println(" ----------------------------------- ");
 
         // Update Matrix
@@ -227,7 +228,7 @@ void loop() {
 
 
 void test(){
-Serial.println(" ----------------------------------- ");
+DEBUG_PRINTLN(" ----------------------------------- ");
 
   degToRad(joints);
 
@@ -240,14 +241,14 @@ Serial.println(" ----------------------------------- ");
 
   float avg_time = (float)(end_time - start_time);
   
-  Serial.printf("Real avg execution time = %.3f us\n", avg_time);
+  DEBUG_PRINTF("Real avg execution time = %.3f us\n", avg_time);
 
   // Print results to ensure 'res' is actually used
-  Serial.println("FK result:");
+  DEBUG_PRINTLN("FK result:");
   printPose(FK_result_container);
-  Serial.println(" ");
+  DEBUG_PRINTLN(" ");
 
-Serial.println(" ----------------------------------- ");
+DEBUG_PRINTLN(" ----------------------------------- ");
 }
 
 
@@ -257,9 +258,9 @@ Serial.println(" ----------------------------------- ");
 void test2()
 {
 
-  Serial.println(" ----------------------------------- ");
-  Serial.println(" ");
-  Serial.println(" ");
+  DEBUG_PRINTLN(" ----------------------------------- ");
+  DEBUG_PRINTLN(" ");
+  DEBUG_PRINTLN(" ");
 
   BLA::Matrix<6,6> J;
   BLA::Matrix<6,6> J_copy;
@@ -271,60 +272,70 @@ void test2()
   auto end_time = micros();
   float avg_time = (float)(end_time - start_time);
 
-  Serial.printf("Jacobian filling execution time = %.3f us\n", avg_time);
+  DEBUG_PRINTF("Jacobian filling execution time = %.3f us\n", avg_time);
 
-  Serial.println("Jacobian Matrix:");
+  DEBUG_PRINTLN("Jacobian Matrix:");
   J.printTo(Serial);
-  Serial.println(" ");
-  Serial.println(" ");
+  DEBUG_PRINTLN(" ");
+  DEBUG_PRINTLN(" ");
 
 
   start_time = micros();
   bool is_non_singular = BLA::Invert(J);
   end_time = micros();
   avg_time = (float)(end_time - start_time);
-  Serial.printf("Jacobian inversion execution time = %.3f us\n", avg_time);
+  DEBUG_PRINTF("Jacobian inversion execution time = %.3f us\n", avg_time);
 
   if(!is_non_singular) {
-    Serial.println("Warning: Jacobian is singular and cannot be inverted.");
+    DEBUG_PRINTLN("Warning: Jacobian is singular and cannot be inverted.");
   } else {
-    Serial.println("Jacobian Matrix successfully inverted.");
+    DEBUG_PRINTLN("Jacobian Matrix successfully inverted.");
     J.printTo(Serial);
   }
 
-  Serial.println(" ");
-  Serial.println(" ");
+  DEBUG_PRINTLN(" ");
+  DEBUG_PRINTLN(" ");
 
   start_time = micros();
   auto res2 = BLA::MatrixTranspose(J_copy);
   end_time = micros();
   avg_time = (float)(end_time - start_time);
-  Serial.printf("Jacobian transpose execution time = %.3f us\n", avg_time);
+  DEBUG_PRINTF("Jacobian transpose execution time = %.3f us\n", avg_time);
 
 
   res2.printTo(Serial);
 
 
-  Serial.println(" ");
-  Serial.println(" ");
-  // Serial.println(J);
-  Serial.println(" ----------------------------------- ");
+  DEBUG_PRINTLN(" ");
+  DEBUG_PRINTLN(" ");
+  // DEBUG_PRINTLN(J);
+  DEBUG_PRINTLN(" ----------------------------------- ");
 }
 
 void test3(){
-Serial.println(" ----------------------------------- ");
-Serial.println(" ");
+DEBUG_PRINTLN(" ----------------------------------- ");
+DEBUG_PRINTLN(" ");
 
   int i;
+  
+  joints2(0, 0) = stepper1->getCurrentPosition() / Constants::Config::J1_STEPS_PER_DEG;
+  joints2(1, 0) = stepper2->getCurrentPosition() / Constants::Config::J2_STEPS_PER_DEG;
+  joints2(2, 0) = stepper3->getCurrentPosition() / Constants::Config::J3_STEPS_PER_DEG;
+  joints2(3, 0) = stepper4->getCurrentPosition() / Constants::Config::J4_STEPS_PER_DEG;
+  joints2(4, 0) = stepper5->getCurrentPosition() / Constants::Config::J5_STEPS_PER_DEG;
+  joints2(5, 0) = stepper6->getCurrentPosition() / Constants::Config::J6_STEPS_PER_DEG;
+
+
+  degToRad(joints2);
   auto start_time = micros();
-  IK_result_container = getIK(joints, &targetPose, i);
+  IK_result_container = getIK_Pos(joints2, &targetPose, i);
   auto end_time = micros();
   auto avg_time = (float)(end_time - start_time);
-  Serial.printf("IK execution time = %.3f us in %d iterations", avg_time, i);
+  DEBUG_PRINTF("IK execution time = %.3f us in %d iterations", avg_time, i);
 
-  Serial.println("IK Result (radians):");
+  DEBUG_PRINTLN("IK Result (radians):");
   IK_result_container.printTo(Serial);
-  Serial.println(" ");
+  DEBUG_PRINTLN(" ");
 
   stepper1->moveTo(IK_result_container(0, 0) * Constants::Config::J1_STEPS_PER_DEG);
   stepper2->moveTo(IK_result_container(1, 0) * Constants::Config::J2_STEPS_PER_DEG);
@@ -334,7 +345,16 @@ Serial.println(" ");
   stepper6->moveTo(IK_result_container(5, 0) * Constants::Config::J6_STEPS_PER_DEG);
   
 
-Serial.println(" ");
-Serial.println(" ----------------------------------- ");
+DEBUG_PRINTLN(" ");
+DEBUG_PRINTLN(" ----------------------------------- ");
+
+}
+
+
+void test4(){
+  DEBUG_PRINTLN(" ----------------------------------- ");
+
+  
+
 
 }
