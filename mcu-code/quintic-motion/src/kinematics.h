@@ -10,7 +10,7 @@ float ez = 89.0f; // End-effector length in mm
  * @param q Array of 6 joint angles (q1 to q6 in radians) passed via the Joints struct
  * @return 4x4 Homogeneous Transformation Matrix
  */
-inline void IRAM_ATTR getFK(BLA::Matrix<6, 1, float>& q,const TrigValues& tc, Pose& result, BLA::Matrix<4,4, float>& T0_ee_result) {
+inline void IRAM_ATTR getFK(BLA::Matrix<6, 1, float>& q,const TrigValues& tc, BLA::Matrix<6, 1, float>& result, BLA::Matrix<4,4, float>& T0_ee_result) {
     
     float q1 = q(0, 0), q2 = q(1, 0), q3 = q(2, 0), q4 = q(3, 0), q5 = q(4, 0), q6 = q(5, 0);
 
@@ -87,15 +87,14 @@ inline void IRAM_ATTR fillJacobian(BLA::Matrix<6, 1, float>& q,const TrigValues&
     Jacobian_result(5, 4) = -tc.c4*tc.s1+tc.s4*(tc.c1*tc.c2*tc.s3+tc.c1*tc.c3*tc.s2);
     Jacobian_result(5, 5) = -tc.s5*(tc.s1*tc.s4+tc.c4*(tc.c1*tc.c2*tc.s3+tc.c1*tc.c3*tc.s2))+tc.c5*(tc.c1*tc.c2*tc.c3-tc.c1*tc.s2*tc.s3);
 }
-std::vector<float> time_container;
 
-inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK(BLA::Matrix<6, 1, float>& current_joint_config, const Pose* target_pose, int& itr_counter)
+
+inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_Pos(BLA::Matrix<6, 1, float>& current_joint_config, BLA::Matrix<6, 1, float>& target_pose, int& itr_counter)
 {
     float dampening_factor = 0.01f; // Adjust as needed for stability
-    float max_step = 0.4f; // Max ~2.8 degrees per step
-    Pose current_pose;
+    float max_step = 0.3f; // Max ~2.8 degrees per step
+    BLA::Matrix<6, 1> current_pose;
     Pose FK_result_container;
-    Joints result;
     BLA::Matrix<6, 1, float> error;
     BLA::Matrix<6, 1, float> delta_q;
     BLA::Matrix<4, 4, float> T0_ee;
@@ -116,8 +115,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK(BLA::Matrix<6, 1, float>& curren
     itr_counter = 0;
     error.Fill(1.0f);
 
-    Serial.println("Starting IK solver...");
-    while (BLA::Norm(error) > 1e-4f && itr_counter < 100)
+    while (BLA::Norm(error) > 1e-1f && itr_counter < 25)
     {
         // Serial.print("Iteration: ");Serial.println(itr_counter);
         itr_counter++;
@@ -138,9 +136,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK(BLA::Matrix<6, 1, float>& curren
 
         // Step 2: Compute the error vector (6x1)
         // start_time = micros();
-        error(0) = target_pose->x - current_pose.x;
-        error(1) = target_pose->y - current_pose.y;
-        error(2) = target_pose->z - current_pose.z;
+        error = target_pose - current_pose;
         // end_time = micros();
         // time = (float)(end_time - start_time);
         // Serial.print("Time taken for step 2: "); Serial.print(time); Serial.println(" microseconds");
@@ -150,7 +146,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK(BLA::Matrix<6, 1, float>& curren
         // Step 3
         // start_time = micros();
         current_rot_matrix = T0_ee.Submatrix<3,3>(0,0);
-        target_rot_matrix = getRotationMatrix(target_pose->rx, target_pose->ry, target_pose->rz);
+        target_rot_matrix = getRotationMatrix(target_pose(3), target_pose(4), target_pose(5));
         rotation_err = target_rot_matrix * BLA::MatrixTranspose(current_rot_matrix);
         // end_time = micros();
         // time = (float)(end_time - start_time);
@@ -222,3 +218,137 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK(BLA::Matrix<6, 1, float>& curren
 
 }
 
+/** 
+ * Calculates q_dot and q after jacibian DLS jacobian inverse
+ * @param Takes in target twist (6x1) of desired cartesian velocities and target positions (6x1) for drift compensation from trajectory generator and current robot joint config in radian
+ * @return 6x1 vector joint positions to command the motors for that exact control cycle
+ */
+inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> current_joint_config, BLA::Matrix<6, 1, float> target_twist, BLA::Matrix<6, 1, float>& target_pose)
+{
+    float dampening_factor = 0.01f; // Adjust as needed for stability
+    // float max_step = 0.3f; // Max ~2.8 degrees per step
+    float gain = 1.0f;
+    float dt = 0.001f; // control loop rate 
+    BLA::Matrix<6, 1, float> current_pose;
+    BLA::Matrix<6, 1, float> q;
+     BLA::Matrix<6, 1, float> qdot;
+    BLA::Matrix<6, 1, float> error;
+    BLA::Matrix<4, 4, float> T0_ee;
+    BLA::Matrix<3, 3, float> current_rot_matrix;
+    BLA::Matrix<3, 3, float> target_rot_matrix;
+    BLA::Matrix<3, 3, float> rotation_err;
+    BLA::Matrix<3, 1, float> angular_error;
+    BLA::Matrix<6, 6, float> J_dampened_least_squares;
+    BLA::Matrix<6, 6, float> I;
+    BLA::Matrix<6, 6, float> Jacobian;
+    TrigValues trig_cache;
+    auto start_time = micros();
+    auto end_time = micros();
+    float time = (float)(end_time - start_time);
+
+    I.Fill(0);
+    I(0,0) = 1.0f; I(1,1) = 1.0f; I(2,2) = 1.0f; I(3,3) = 1.0f; I(4,4) = 1.0f; I(5,5) = 1.0f;
+    error.Fill(1.0f);
+
+    
+    // Serial.print("Iteration: ");Serial.println(itr_counter);
+
+    // step 0
+    // start_time = micros();
+    trig_cache = computeTrigValues(current_joint_config);
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 0: "); Serial.print(time); Serial.println(" microseconds");
+    // Step 1
+    // start_time = micros();
+    getFK(current_joint_config, trig_cache, current_pose, T0_ee);
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 1: "); Serial.print(time); Serial.println(" microseconds");
+    
+    
+
+    // Step 2: Compute the error vector (6x1)
+    // start_time = micros();
+    error = target_pose - current_pose;
+
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 2: "); Serial.print(time); Serial.println(" microseconds");
+    
+    
+
+    // Step 3
+    // start_time = micros();
+    current_rot_matrix = T0_ee.Submatrix<3,3>(0,0);
+    target_rot_matrix = getRotationMatrix(target_pose(3), target_pose(4), target_pose(5));
+    rotation_err = target_rot_matrix * BLA::MatrixTranspose(current_rot_matrix);
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 3: "); Serial.print(time); Serial.println(" microseconds");
+    
+
+    // Extract the [dRx, dRy, dRz] vector
+    // step 4
+    // start_time = micros();
+    angular_error = getAxisAngleError(rotation_err);
+    error(3) = angular_error(0);
+    error(4) = angular_error(1);
+    error(5) = angular_error(2);
+
+    // target_twist = target_twist +  gain * error;################
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 4: "); Serial.print(time); Serial.println(" microseconds");
+    
+
+    // start_time = micros();
+    fillJacobian(current_joint_config, trig_cache, Jacobian); //step 5
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 5: "); Serial.print(time); Serial.println(" microseconds");
+    
+
+    // start_time = micros();
+    J_dampened_least_squares = (Jacobian * BLA::MatrixTranspose(Jacobian) + dampening_factor*dampening_factor * I); // step 6
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 6: "); Serial.print(time); Serial.println(" microseconds");
+    
+
+    // start_time = micros();
+    J_dampened_least_squares = BLA::MatrixTranspose(Jacobian) * BLA::Inverse(J_dampened_least_squares); //step 7
+    // end_time = micros();
+    // time = (float)(end_time - start_time);
+    // Serial.print("Time taken for step 7: "); Serial.print(time); Serial.println(" microseconds");
+    
+    // J_simple_inverse = BLA::Inverse(Jacobian);
+
+    qdot = J_dampened_least_squares * target_twist;
+
+    
+    current_joint_config += qdot * dt;
+    // q = current_joint_config + qdot * dt;
+    // radToDeg(current_joint_config);
+    // Serial.print("[");
+    // for(int j=0; j<6; j++){
+    //     Serial.print(current_joint_config(j, 0) * (180.0f / PI)); 
+    //     if(j < 5) Serial.print(", ");
+    // }
+    // Serial.println("]");
+    // Serial.println(" ");
+    // Serial.println("---***-");
+
+    // getFK(current_joint_config, FK_result_container, T0_ee);
+    // Serial.println("FK result:");
+    // printPose(FK_result_container);
+    // Serial.println(" ");
+    // for (int i = 0; i <= time_container.size(); i++) {
+    //     Serial.println(); Serial.print("Time taken for step: "); Serial.print(i); Serial.print(" ");
+    //     Serial.print(time_container[i]); Serial.print(" microseconds, ");
+    // }
+    radToDeg(current_joint_config);
+    // printVec(current_joint_config);
+    return current_joint_config;
+
+}

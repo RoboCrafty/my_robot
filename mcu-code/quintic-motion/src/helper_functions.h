@@ -41,12 +41,12 @@ inline float radToDeg(float rad_angle)
     return result;
 }
 
-inline Pose IRAM_ATTR extract_pose_from_transformation_matrix(const BLA::Matrix<4,4, float>& T0_ee)
+inline BLA::Matrix<6, 1, float> IRAM_ATTR extract_pose_from_transformation_matrix(const BLA::Matrix<4,4, float>& T0_ee)
 {
-    Pose result;
-    result.x   = T0_ee(0,3);
-    result.y   = T0_ee(1,3);
-    result.z   = T0_ee(2,3);
+    BLA::Matrix<6, 1, float> result;
+    result(0, 0) = T0_ee(0,3);
+    result(1, 0) = T0_ee(1,3);
+    result(2, 0) = T0_ee(2,3);
     float r11 = T0_ee(0,0), r12 = T0_ee(0,1), r13 = T0_ee(0,2);
     float r21 = T0_ee(1,0), r22 = T0_ee(1,1), r23 = T0_ee(1,2);
     float r31 = T0_ee(2,0), r32 = T0_ee(2,1), r33 = T0_ee(2,2);
@@ -56,9 +56,9 @@ inline Pose IRAM_ATTR extract_pose_from_transformation_matrix(const BLA::Matrix<
     float pitch = atan2(-r31, sqrt(r32*r32 + r33*r33)); // More numerically stable than asin(-r31)
     float yaw  = atan2(r21, r11);
 
-    result.rx = roll;
-    result.ry = pitch;
-    result.rz = yaw;
+    result(3, 0) = roll;
+    result(4, 0) = pitch;
+    result(5, 0) = yaw;
     // TODO: Figure out gimbal lock stuff. Maybe quaternions??
     // else
     // {
@@ -86,15 +86,26 @@ inline BLA::Matrix<3, 3, float> getRotationMatrix(float rx, float ry, float rz)
 }
 
 
-inline void IRAM_ATTR printPose(const Pose& p)
+inline void IRAM_ATTR printPose(BLA::Matrix<6, 1, float>&  p)
 {
-    Serial.print("x: ");    Serial.print(p.x, 5 );
-    Serial.print(" | y: "); Serial.print(p.y, 5);
-    Serial.print(" | z: "); Serial.print(p.z, 5);
+    Serial.print("x: ");    Serial.print(p(0, 0), 5 );
+    Serial.print(" | y: "); Serial.print(p(1, 0), 5);
+    Serial.print(" | z: "); Serial.print(p(2, 0), 5);
 
-    Serial.print(" | rx: "); Serial.print(radToDeg(p.rx), 5);
-    Serial.print(" | ry: "); Serial.print(radToDeg(p.ry), 5);
-    Serial.print(" | rz: "); Serial.println(radToDeg(p.rz), 5);
+    Serial.print(" | rx: "); Serial.print(radToDeg(p(3, 0)), 5);
+    Serial.print(" | ry: "); Serial.print(radToDeg(p(4, 0)), 5);
+    Serial.print(" | rz: "); Serial.println(radToDeg(p(5, 0)), 5);
+}
+
+inline void IRAM_ATTR printVec(BLA::Matrix<6, 1, float>&  p)
+{
+    Serial.print("0: ");    Serial.print(p(0, 0), 5 );
+    Serial.print(" | 1: "); Serial.print(p(1, 0), 5);
+    Serial.print(" | 2: "); Serial.print(p(2, 0), 5);
+
+    Serial.print(" | 3: "); Serial.print(radToDeg(p(3, 0)), 5);
+    Serial.print(" | 4: "); Serial.print(radToDeg(p(4, 0)), 5);
+    Serial.print(" | 5: "); Serial.println(radToDeg(p(5, 0)), 5);
 }
 
 inline BLA::Matrix<3, 1, float> getAxisAngleError(BLA::Matrix<3, 3, float> R)
