@@ -11,9 +11,13 @@ inline OutputParameter<DOFs> output;
 
 inline void setupRuckig() 
 {
-    input.max_velocity = {0.50};       
-    input.max_acceleration = {5.50}; 
-    input.max_jerk = {10.0};         
+    // HARD CEILING for moveTimed on J6: MIN_CMD_TICKS = TICKS_PER_S/5000 = 3200
+    // ticks/step => max 5000 steps/s => 5000/44.44 = 112.5 deg/s = 1.96 rad/s.
+    // Anything above that makes moveTimed reject windows with ErrorTicksTooLow.
+    // Keep ~30% margin below the ceiling.
+    input.max_velocity     = {7.0};    // rad/s  (J6 ceiling ~1.96 rad/s)
+    input.max_acceleration = {30.0};    // rad/s²
+    input.max_jerk         = {120.0};   // rad/s³
 
     input.current_position = {0.0};
     input.current_velocity = {0.0};

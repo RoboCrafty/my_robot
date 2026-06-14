@@ -28,8 +28,12 @@ BLA::Matrix<6, 1, float> targetPose;
 BLA::Matrix<6, 1, float> IK_result_container;
 BLA::Matrix<4, 4, float> T0_ee_result;
 
-auto stepperQueue = xQueueCreate(10, sizeof(JointFrame));
+auto stepperQueue = xQueueCreate(20, sizeof(JointFrame));
 void feeder(void *pvParameters);
+// Set true while a trajectory is being produced. The feeder uses it to know
+// the TRUE end of a motion (vs a transient queue hiccup) so it only flushes a
+// final partial batch window when the motion has actually finished.
+volatile bool g_motionActive = false;
 
 
 unsigned long previous_loop_time = 0;
@@ -109,6 +113,20 @@ void setup()
     steppers[3]->setCurrentPosition(0);
     steppers[4]->setCurrentPosition(0);
     steppers[5]->setCurrentPosition(0);
+
+    // CRITICAL: homeAxis() drives each stepper with the RAMP generator
+    // (runForward / forceStopAndNewPosition / moveTo). After forceStop the
+    // stepper IGNORES every subsequent moveTimed() call (see FastAccelStepper
+    // issue #299, reported by Matoseb / confirmed by gin66). That makes the
+    // motor never move AND makes our feeder's retry loop spin forever on the
+    // ignored (busy) return -> the queue fills -> loop() is stuck in Executing
+    // -> no more serial -> "frozen". We must hand each stepper from ramp mode
+    // into the moveTimed state machine by priming an empty (start=false) timed
+    // window, exactly as the official moveTimed example does.
+    for (int i = 0; i < 6; i++) {
+        steppers[i]->stopMove();                 // ensure ramp generator is idle
+        steppers[i]->moveTimed(0, TICKS_PER_S / 240, NULL, false); // prime moveTimed
+    }
     // steppers[4]->moveTo(90*Constants::Config::J5_STEPS_PER_DEG);
     // delay(1000);
     Serial.println("--- System Initialized ---\n");
@@ -399,6 +417,7 @@ void loop()
         if(res == Result::Finished)
         {
           output.pass_to_input(input); // lock current_position to the exact final target
+          g_motionActive = false;      // tell feeder to flush the final partial window
           currentState = RobotState::Idle;
           break;
         }
@@ -512,6 +531,7 @@ void handleSerial()
         joints(5, 0) = j6_angle;
 
         currentState = RobotState::Executing;
+        g_motionActive = true;
 
         // Do NOT seed current_position from the stepper readback: this is an
         // open-loop planner and Ruckig already holds its own last position
@@ -547,97 +567,174 @@ void handleSerial()
 
 
 
-JointFrame emitted = {{0,0,0,0,0,0}};
-bool primed = false;
+JointFrame emitted = {{0,0,0,0,0,0}};          // last absolute position absorbed (delta baseline)
+// Per-joint leftover ticks. moveTimed uses integer rate = duration/steps, so
+// actual_duration = rate*steps <= duration. The unspent (duration - actual)
+// ticks are carried into the next window so the cumulative timeline stays
+// locked to real time (same trick as the official moveTimed example).
+uint32_t feederDrift[6] = {0, 0, 0, 0, 0, 0};
+
+// ---- Batching state ------------------------------------------------------
+// At low step rates (~1 step/ms) emitting one moveTimed window per 1ms frame
+// forces the step count to integers (1,2,1,2..), which makes the per-window
+// velocity swing +-50% every ms -> audible buzz. Instead we ACCUMULATE the
+// per-joint step deltas (and the elapsed time) across several producer frames
+// and emit a single window only once enough steps have piled up. The library
+// then spaces those many steps evenly at one constant interval inside the
+// window -- exactly like the ramp generator -- so the motion is smooth.
+int32_t  accSteps[6] = {0, 0, 0, 0, 0, 0};      // steps accumulated since last flush
+uint32_t accTicks = 0;                          // window duration accumulated since last flush
+static const int32_t  BATCH_MIN_STEPS = 16;     // flush once the busiest joint has this many steps
+static const uint32_t BATCH_MAX_TICKS = TICKS_PER_S / 40; // ...or after ~25ms (latency cap / slow-motion flush)
+
+// ---- Keep-alive ----------------------------------------------------------
+// CRITICAL: the HW queue must never run fully empty. If it does, the driver
+// calls init_stop(), which halts the MCPWM timer but leaves its counter value
+// frozen. isReadyForCommands() then latches false (timer_value > 1) and EVERY
+// subsequent moveTimed() returns DeviceNotReady (code 4) -- a state the public
+// API cannot recover from (addQueueEntry bails before it can restart the
+// timer). The motor stops and the feeder/loop freeze. To prevent this we top
+// up each idle stepper with short 0-step PAUSE windows so isRunning() stays
+// true and the timer never latches. A 0-step pause holds position exactly (no
+// motion, no lost steps) -- safe both between commands and during a transient
+// producer underrun.
+static const uint32_t KEEPALIVE_TICKS     = TICKS_PER_S / 250; // ~4ms pause per top-up (>= MIN_CMD_TICKS)
+static const uint32_t KEEPALIVE_MIN_TICKS = TICKS_PER_S / 100; // top up when < ~10ms remain in the HW queue
+
+// Emit the accumulated batch as ONE timed window across all 6 joints, then
+// clear the accumulator. Blocks (with backpressure) until every joint's window
+// is appended to its hardware queue. Each joint appends exactly one window
+// (its steps, or a pure pause if it didn't move) sharing the same duration, so
+// the axes stay time-synchronized.
+static void flushBatchWindow()
+{
+  uint32_t winTicks = accTicks;
+  if (winTicks == 0) return;
+  bool flushed[6] = {false, false, false, false, false, false};
+  uint32_t spins = 0;                       // guard against an endless busy loop
+  while (true)
+  {
+    bool busy = false;
+    bool fault = false;
+    for (int i = 0; i < 6; i++)
+    {
+      if (flushed[i]) continue;
+      uint32_t dur = winTicks + feederDrift[i];
+      uint32_t actual = 0;
+      MoveTimedResultCode r = steppers[i]->moveTimed(accSteps[i], dur, &actual, true);
+      if (r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
+        feederDrift[i] = dur - actual; // carry leftover ticks forward
+        flushed[i] = true;
+      } else if (static_cast<int8_t>(r) > 0) {
+        busy = true;                   // HW queue full -> retry just this joint
+      } else {
+        fault = true;
+        Serial.printf("FAULT! moveTimed error on Joint %d. Error Code: %d\n", i, static_cast<int>(r));
+      }
+    }
+    if (fault) {
+      Serial.println("Executing Emergency Stop across all axes...");
+      for (int j = 0; j < 6; j++) steppers[j]->stopMove();
+      xQueueReset(stepperQueue);
+      for (int j = 0; j < 6; j++) { feederDrift[j] = 0; accSteps[j] = 0; }
+      accTicks = 0;
+      return;
+    }
+    if (!busy) break;                  // all 6 windows appended
+    // HW queues full: wait ~1ms for the silicon timer to drain a slot, then
+    // retry the not-yet-appended joints. This is the real-time backpressure.
+    // A genuine HW-queue-full state clears within a few ms as the timer drains.
+    // If a joint stays "busy" for ~250ms it is NOT backpressure -- it is a
+    // stepper that is ignoring moveTimed (e.g. still owned by the ramp
+    // generator after a forceStop). Report it (with the joint + code) and bail
+    // instead of freezing the whole ESP forever.
+    if (++spins > 250) {
+      for (int i = 0; i < 6; i++) {
+        if (flushed[i]) continue;
+        uint32_t actual = 0;
+        MoveTimedResultCode r = steppers[i]->moveTimed(accSteps[i], winTicks, &actual, true);
+        Serial.printf("STUCK: Joint %d moveTimed not accepted (code %d). "
+                      "Likely ignoring moveTimed after ramp/forceStop.\n",
+                      i, static_cast<int>(r));
+      }
+      for (int j = 0; j < 6; j++) { accSteps[j] = 0; }
+      accTicks = 0;
+      return;
+    }
+    vTaskDelay(1);
+  }
+  for (int j = 0; j < 6; j++) accSteps[j] = 0;
+  accTicks = 0;
+}
 
 void feeder(void *pvParameters)
 {
-  JointFrame j_recv = {{0,0,0,0,0,0}};
+  JointFrame j_recv = {{0, 0, 0, 0, 0, 0}};
+  static uint32_t underrun_count = 0;
+  static uint32_t last_empty_print_ms = 0;
   while (true)
   {
-    // PEEK (don't remove) so a frame is only popped AFTER it is fully appended
-    // to all 6 hardware queues. Removing it up-front (the old bug) dropped the
-    // frame whenever the HW queue was full, collapsing the trajectory timing.
-    if(xQueuePeek(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS)
+    if (xQueueReceive(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS)
     {
-      bool fault_detected = false;
-      bool need_retry = false;
+      // Absorb this frame into the batch accumulator (RAM only, never fails).
       for (int i = 0; i < 6; i++)
       {
         int32_t delta = j_recv.q_steps[i] - emitted.q_steps[i];
-        MoveTimedResultCode r = steppers[i]->moveTimed(delta, TICKS_PER_S / 1000, NULL, true);
-        if(r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
-          // Appended OK. MoveEmpty == appended but HW queue had run empty
-          // (a mild underrun) -- still a success, so advance emitted.
-          emitted.q_steps[i] += delta;
-        } else if (static_cast<int8_t>(r) > 0)
-        {
-          need_retry = true; // QueueFull / Busy: append FAILED -> retry same frame
-        }
-        else if (static_cast<int>(r) < 0)
-        { 
-          fault_detected = true;
-          Serial.printf("FAULT! moveTimed error on Joint %d. Error Code: %d\n", i, static_cast<int>(r));
-        }
-        
+        accSteps[i] += delta;
+        emitted.q_steps[i] = j_recv.q_steps[i];
       }
-      if (fault_detected) {
-        Serial.println("Executing Emergency Stop across all axes...");
-        
-        for (int j = 0; j < 6; j++) {
-           steppers[j]->stopMove(); // Immediately halt pulse generation
-        }
+      accTicks += (TICKS_PER_S / 1000);
 
-        // Flush the FreeRTOS queue so we don't accidentally execute stale commands later
-        xQueueReset(stepperQueue);
-        fault_detected = false; // Reset fault flag after handling
-        
-        // Optionally: Set a global atomic flag here to tell Core 0 to stop planning
-        // is_trajectory_active = false;
+      // Flush once the busiest joint has enough steps for a smooth evenly
+      // spaced window, or a latency cap is reached (keeps slow motion moving).
+      int32_t mx = 0;
+      for (int i = 0; i < 6; i++) {
+        int32_t a = accSteps[i] < 0 ? -accSteps[i] : accSteps[i];
+        if (a > mx) mx = a;
       }
-    
-      if (need_retry)
-      {
-        // HW queues are full: do NOT pop the peeked frame. Wait ~1ms for the
-        // silicon timer to drain one slot, then re-peek and retry the SAME
-        // frame. This 1ms wait is the real-time backpressure that throttles the
-        // feeder to the hardware drain rate (and thus the producer).
-        vTaskDelay(1);
+      if (mx >= BATCH_MIN_STEPS || accTicks >= BATCH_MAX_TICKS) {
+        flushBatchWindow();
       }
-      else
-      {
-        // Frame fully appended -> remove it from the queue and advance.
-        xQueueReceive(stepperQueue, &j_recv, 0);
-        primed = true; // mark motion active (for underrun detection)
-      }
-
-      
     }
     else
     {
-      // FreeRTOS queue empty: if we were mid-motion (primed==true) this is a
-      // real-time UNDERRUN -- the producer failed to keep the HW queue fed.
-      // Count and report these so starvation is visible.
-      static uint32_t underrun_count = 0;
-      static uint32_t last_empty_print_ms = 0;
-      if (primed) underrun_count++;
-      if (millis() - last_empty_print_ms >= 1000) {
-        last_empty_print_ms = millis();
-        if (underrun_count > 0) {
-          Serial.printf("UNDERRUN: queue starved %u times in last 1s\n", underrun_count);
-          underrun_count = 0;
+      // FreeRTOS queue empty right now.
+      // If a motion has truly finished, emit the final partial batch so the
+      // trajectory lands exactly on target.
+      if (!g_motionActive && accTicks > 0) {
+        flushBatchWindow();
+      }
+
+      // KEEP-ALIVE: keep every stepper's HW queue from ever running dry. If a
+      // queue empties, the MCPWM timer halts and latches the device into
+      // DeviceNotReady forever (see note at KEEPALIVE_TICKS). Topping up the
+      // about-to-be-empty queues with a short 0-step pause keeps isRunning()
+      // true so the timer never latches. Holds position exactly.
+      for (int i = 0; i < 6; i++) {
+        if (!steppers[i]->hasTicksInQueue(KEEPALIVE_MIN_TICKS)) {
+          uint32_t dur = KEEPALIVE_TICKS + feederDrift[i];
+          uint32_t actual = 0;
+          MoveTimedResultCode r = steppers[i]->moveTimed(0, dur, &actual, true);
+          if (r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
+            feederDrift[i] = dur - actual; // carry leftover ticks forward
+          }
         }
       }
-      primed = false; // If we hit an empty queue, we should reset the primed status to avoid unintended large moves when new commands come in
-      // for (int i = 0; i < 6; i++)      
-      // {
-      //   MoveTimedResultCode r = steppers[i]->moveTimed(0, TICKS_PER_S / 1000, NULL, true); // Send a zero move with start=true to ensure the queue is running and to reset any internal state in the stepper library
-      //   if (!moveTimedIsOk(r) && allow_print) {
-      //     // Serial.printf("Error sending zero move to Joint %d. Error Code: %d\n", i, r);
-      //   }
-      // }
+
+      if (g_motionActive)
+      {
+        // Producer fell behind == real-time underrun. The keep-alive above
+        // bridges the gap (a brief pause) instead of latching. Report it
+        // (throttled) so a persistent producer stall is still visible.
+        underrun_count++;
+        if (millis() - last_empty_print_ms >= 1000) {
+          last_empty_print_ms = millis();
+          if (underrun_count > 0) {
+            Serial.printf("UNDERRUN: queue starved %u times in last 1s\n", underrun_count);
+            underrun_count = 0;
+          }
+        }
+      }
     }
   }
-
-
 }
