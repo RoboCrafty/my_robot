@@ -223,14 +223,14 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_Pos(BLA::Matrix<6, 1, float>& cu
  * @param Takes in target twist (6x1) of desired cartesian velocities and target positions (6x1) for drift compensation from trajectory generator and current robot joint config in radian
  * @return 6x1 vector joint positions to command the motors for that exact control cycle
  */
-inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> current_joint_config, BLA::Matrix<6, 1, float> target_twist, BLA::Matrix<6, 1, float>& target_pose)
+inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float>& current_joint_config, BLA::Matrix<6, 1, float> target_twist, BLA::Matrix<6, 1, float>& target_pose)
 {
     float dampening_factor = 0.01f; // Adjust as needed for stability
     // float max_step = 0.3f; // Max ~2.8 degrees per step
-    float gain = 1.0f;
+    float gain = 5.0f;
     float dt = 0.001f; // control loop rate 
     BLA::Matrix<6, 1, float> current_pose;
-    BLA::Matrix<6, 1, float> q;
+    BLA::Matrix<6, 1, float> q_delta;
      BLA::Matrix<6, 1, float> qdot;
     BLA::Matrix<6, 1, float> error;
     BLA::Matrix<4, 4, float> T0_ee;
@@ -250,6 +250,17 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     I(0,0) = 1.0f; I(1,1) = 1.0f; I(2,2) = 1.0f; I(3,3) = 1.0f; I(4,4) = 1.0f; I(5,5) = 1.0f;
     error.Fill(1.0f);
 
+    // Serial.println("Received current_joint_config: ");
+    // printVec(current_joint_config);
+
+    // Serial.println("Received target twise: ");
+    // printVec(target_twist);
+
+    // Serial.println("Received target pose: ");
+    // printVec(target_pose);
+
+    
+
     
     // Serial.print("Iteration: ");Serial.println(itr_counter);
 
@@ -262,6 +273,8 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     // Step 1
     // start_time = micros();
     getFK(current_joint_config, trig_cache, current_pose, T0_ee);
+    // Serial.println("getFK result: ");
+    // printVec(current_pose);
     // end_time = micros();
     // time = (float)(end_time - start_time);
     // Serial.print("Time taken for step 1: "); Serial.print(time); Serial.println(" microseconds");
@@ -271,6 +284,8 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     // Step 2: Compute the error vector (6x1)
     // start_time = micros();
     error = target_pose - current_pose;
+    // Serial.println("error result: ");
+    // printVec(error);
 
     // end_time = micros();
     // time = (float)(end_time - start_time);
@@ -296,7 +311,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     error(4) = angular_error(1);
     error(5) = angular_error(2);
 
-    // target_twist = target_twist +  gain * error;################
+    target_twist = target_twist +  gain * error;
     // end_time = micros();
     // time = (float)(end_time - start_time);
     // Serial.print("Time taken for step 4: "); Serial.print(time); Serial.println(" microseconds");
@@ -325,9 +340,11 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     // J_simple_inverse = BLA::Inverse(Jacobian);
 
     qdot = J_dampened_least_squares * target_twist;
+    // Serial.println("qdot result: ");
+    // printVec(qdot);
 
-    
-    current_joint_config += qdot * dt;
+    q_delta = qdot * dt;
+    current_joint_config += q_delta;
     // q = current_joint_config + qdot * dt;
     // radToDeg(current_joint_config);
     // Serial.print("[");
@@ -347,8 +364,12 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float> cu
     //     Serial.println(); Serial.print("Time taken for step: "); Serial.print(i); Serial.print(" ");
     //     Serial.print(time_container[i]); Serial.print(" microseconds, ");
     // }
-    radToDeg(current_joint_config);
+    radToDeg(q_delta);
+    // Serial.println("returned q: ");
     // printVec(current_joint_config);
-    return current_joint_config;
+    // printVec(current_joint_config);
+    // delay(1000);
+    return q_delta;
+    
 
 }
