@@ -103,9 +103,20 @@ inline void IRAM_ATTR printVec(BLA::Matrix<6, 1, float>&  p)
     Serial.print(" | 1: "); Serial.print(p(1, 0), 5);
     Serial.print(" | 2: "); Serial.print(p(2, 0), 5);
 
-    Serial.print(" | 3: "); Serial.print(radToDeg(p(3, 0)), 5);
-    Serial.print(" | 4: "); Serial.print(radToDeg(p(4, 0)), 5);
-    Serial.print(" | 5: "); Serial.println(radToDeg(p(5, 0)), 5);
+    Serial.print(" | 3: "); Serial.print((3, 0), 5);
+    Serial.print(" | 4: "); Serial.print((4, 0), 5);
+    Serial.print(" | 5: "); Serial.println((5, 0), 5);
+}
+
+inline void IRAM_ATTR printVecCSV(BLA::Matrix<6, 1, float>&  p)
+{
+    Serial.print(p(0, 0), 5 );
+    Serial.print(", "); Serial.print(p(1, 0), 5);
+    Serial.print(", "); Serial.print(p(2, 0), 5);
+
+    Serial.print(", "); Serial.print(p(3, 0), 5);
+    Serial.print(", "); Serial.print(p(4, 0), 5);
+    Serial.print(", "); Serial.println(p(5, 0), 5);
 }
 
 inline BLA::Matrix<3, 1, float> getAxisAngleError(BLA::Matrix<3, 3, float> R)

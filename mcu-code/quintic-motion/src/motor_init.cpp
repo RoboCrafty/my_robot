@@ -1,12 +1,8 @@
 #include "motor_init.h"
 
 FastAccelStepperEngine engine = FastAccelStepperEngine();
-FastAccelStepper *stepper1;
-FastAccelStepper *stepper2;
-FastAccelStepper *stepper3;
-FastAccelStepper *stepper4;
-FastAccelStepper *stepper5;
-FastAccelStepper *stepper6;
+FastAccelStepper *steppers[6] = {nullptr};
+
 
 TMC2209Stepper J1_driver(&SERIAL_PORT2, Constants::Driver::R_SENSE_BTT,     Constants::Driver::J1_ADDRESS);
 TMC2209Stepper J2_driver(&SERIAL_PORT1, Constants::Driver::R_SENSE_BTT,     Constants::Driver::J2_ADDRESS);

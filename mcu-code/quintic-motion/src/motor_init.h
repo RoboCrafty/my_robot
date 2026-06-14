@@ -56,23 +56,23 @@ namespace Constants {
         constexpr uint16_t J1_CURRENT = 1800;
         constexpr uint16_t J2_CURRENT = 1800;
         constexpr uint16_t J3_CURRENT = 1600;
-        constexpr uint16_t J4_CURRENT = 1300;
-        constexpr uint16_t J5_CURRENT = 1300;
+        constexpr uint16_t J4_CURRENT = 1200;
+        constexpr uint16_t J5_CURRENT = 1100;
         constexpr uint16_t J6_CURRENT = 965;
 
-        constexpr float J1_HOLD_MULTIPLIER = 0.7f;
-        constexpr float J2_HOLD_MULTIPLIER = 0.7f;
-        constexpr float J3_HOLD_MULTIPLIER = 0.7f;
-        constexpr float J4_HOLD_MULTIPLIER = 0.7f;
-        constexpr float J5_HOLD_MULTIPLIER = 0.7f;
-        constexpr float J6_HOLD_MULTIPLIER = 0.7f;
+        constexpr float J1_HOLD_MULTIPLIER = 0.5f;
+        constexpr float J2_HOLD_MULTIPLIER = 0.8f;
+        constexpr float J3_HOLD_MULTIPLIER = 0.5f;
+        constexpr float J4_HOLD_MULTIPLIER = 0.5f;
+        constexpr float J5_HOLD_MULTIPLIER = 0.5f;
+        constexpr float J6_HOLD_MULTIPLIER = 0.5f;
 
-        constexpr uint32_t J1_TPWMTHRS = 100;
-        constexpr uint32_t J2_TPWMTHRS = 100;
-        constexpr uint32_t J3_TPWMTHRS = 100;
-        constexpr uint32_t J4_TPWMTHRS = 50;
-        constexpr uint32_t J5_TPWMTHRS = 50;
-        constexpr uint32_t J6_TPWMTHRS = 50;
+        constexpr uint32_t J1_TPWMTHRS = 100*0;
+        constexpr uint32_t J2_TPWMTHRS = 100*0;
+        constexpr uint32_t J3_TPWMTHRS = 100*0;
+        constexpr uint32_t J4_TPWMTHRS = 50*0;
+        constexpr uint32_t J5_TPWMTHRS = 50*0;
+        constexpr uint32_t J6_TPWMTHRS = 50*1;
 
         constexpr uint16_t J1_MICOSTEPS = 8;
         constexpr uint16_t J2_MICOSTEPS = 8;
@@ -108,13 +108,7 @@ namespace Constants {
     // Global variables
     // ================= EXTERN VARIABLES =================
     extern FastAccelStepperEngine engine;
-
-    extern FastAccelStepper *stepper1;
-    extern FastAccelStepper *stepper2;
-    extern FastAccelStepper *stepper3;
-    extern FastAccelStepper *stepper4;
-    extern FastAccelStepper *stepper5;
-    extern FastAccelStepper *stepper6;
+    extern FastAccelStepper *steppers[6];
 
     extern TMC2209Stepper J1_driver;
     extern TMC2209Stepper J2_driver;

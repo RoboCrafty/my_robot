@@ -132,12 +132,12 @@ inline void homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direc
 inline void homeAxis(uint8_t joint)
 {
     switch (joint) {
-        case 1: homeAxis(stepper1, 1, Constants::Config::J1_HOMING_DIR, Constants::Config::J1_HOMING_SPEED, Constants::Config::J1_HOMED_POSITION, Constants::Config::J1_STEPS_PER_DEG); break;
-        case 2: homeAxis(stepper2, 2, Constants::Config::J2_HOMING_DIR, Constants::Config::J2_HOMING_SPEED, Constants::Config::J2_HOMED_POSITION, Constants::Config::J2_STEPS_PER_DEG); break;
-        case 3: homeAxis(stepper3, 3, Constants::Config::J3_HOMING_DIR, Constants::Config::J3_HOMING_SPEED, Constants::Config::J3_HOMED_POSITION, Constants::Config::J3_STEPS_PER_DEG); break;
-        case 4: homeAxis(stepper4, 4, Constants::Config::J4_HOMING_DIR, Constants::Config::J4_HOMING_SPEED, Constants::Config::J4_HOMED_POSITION, Constants::Config::J4_STEPS_PER_DEG); break;
-        case 5: homeAxis(stepper5, 5, Constants::Config::J5_HOMING_DIR, Constants::Config::J5_HOMING_SPEED, Constants::Config::J5_HOMED_POSITION, Constants::Config::J5_STEPS_PER_DEG); break;
-        case 6: homeAxis(stepper6, 6, Constants::Config::J6_HOMING_DIR, Constants::Config::J6_HOMING_SPEED, Constants::Config::J6_HOMED_POSITION, Constants::Config::J6_STEPS_PER_DEG); break;
+        case 1: homeAxis(steppers[0], 1, Constants::Config::J1_HOMING_DIR, Constants::Config::J1_HOMING_SPEED, Constants::Config::J1_HOMED_POSITION, Constants::Config::J1_STEPS_PER_DEG); break;
+        case 2: homeAxis(steppers[1], 2, Constants::Config::J2_HOMING_DIR, Constants::Config::J2_HOMING_SPEED, Constants::Config::J2_HOMED_POSITION, Constants::Config::J2_STEPS_PER_DEG); break;
+        case 3: homeAxis(steppers[2], 3, Constants::Config::J3_HOMING_DIR, Constants::Config::J3_HOMING_SPEED, Constants::Config::J3_HOMED_POSITION, Constants::Config::J3_STEPS_PER_DEG); break;
+        case 4: homeAxis(steppers[3], 4, Constants::Config::J4_HOMING_DIR, Constants::Config::J4_HOMING_SPEED, Constants::Config::J4_HOMED_POSITION, Constants::Config::J4_STEPS_PER_DEG); break;
+        case 5: homeAxis(steppers[4], 5, Constants::Config::J5_HOMING_DIR, Constants::Config::J5_HOMING_SPEED, Constants::Config::J5_HOMED_POSITION, Constants::Config::J5_STEPS_PER_DEG); break;
+        case 6: homeAxis(steppers[5], 6, Constants::Config::J6_HOMING_DIR, Constants::Config::J6_HOMING_SPEED, Constants::Config::J6_HOMED_POSITION, Constants::Config::J6_STEPS_PER_DEG); break;
         default: Serial.println("Invalid joint number for homing."); break;
     }
 }
