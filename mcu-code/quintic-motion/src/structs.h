@@ -1,5 +1,14 @@
 #pragma once
 
+// Trajectory control timestep (seconds). ONE source of truth used by THREE
+// coupled sites that MUST agree or the joint integration desyncs from real
+// time: (1) Ruckig control cycle -> Ruckig ruck(TRAJ_DT_S) in motion_planner.h;
+// (2) RRMC integration step -> dt in getIK_RRMC (kinematics.h); (3) the feeder's
+// per-frame HW-queue duration -> accTicks += TICKS_PER_S*TRAJ_DT_S (main.cpp).
+// 4ms = 250 Hz: matches the official moveTimed example and gives the producer
+// (~1ms per RRMC+IK frame) a ~4x real-time margin so the HW queue never starves.
+#define TRAJ_DT_S 0.001f
+
 struct Joints {
     float q1, q2, q3, q4, q5, q6;
 };

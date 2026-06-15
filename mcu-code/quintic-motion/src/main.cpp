@@ -100,12 +100,12 @@ void setup()
 
 
 
-    // homeAxis(1);
-    // homeAxis(2);
-    // homeAxis(3);
-    // homeAxis(4);
+    homeAxis(1);
+    homeAxis(2);
+    homeAxis(3);
+    homeAxis(4);
     homeAxis(6);
-    // homeAxis(5);
+    homeAxis(5);
     delay(3000); // Wait for homing to complete
     steppers[0]->setCurrentPosition(0);
     steppers[1]->setCurrentPosition(0);
@@ -286,7 +286,10 @@ BLA::Matrix<6,1> W1 = {0.15, 0.245, 0.199, 1.57, 0, 0};
 BLA::Matrix<6,1> W2 = {-0.050, 0.334, 0.28889, 0, 0, 0};
 BLA::Matrix<6,1> diff = (W1 - T_home); 
 float dist = BLA::Norm(diff.Submatrix<3,1>(0,0));
-BLA::Matrix<6, 1, float> ideal_joint_config;
+// Continuously integrated joint configuration (radians). Initialised to the
+// homed configuration (all zero). NOT reset between moves so chained segments
+// start from the true current configuration.
+BLA::Matrix<6, 1, float> ideal_joint_config = {0, 0, 0, 0, 0, 0};
 float t;
 
 
@@ -397,6 +400,74 @@ enum class RobotState {
     Homing
 };
 RobotState currentState;
+
+// ===================== RRMC PRODUCER =====================
+// T_home holds the segment START pose, which is also the robot's persistent
+// current Cartesian pose: it begins at the homed pose and is advanced to each
+// goal as moves complete. g_goalPose is the active segment's target.
+static BLA::Matrix<6, 1, float> g_goalPose = {0, 0, 0, 0, 0, 0};
+
+// Start a resolved-rate straight-line segment from the current Cartesian pose
+// (T_home) to 'goalPose'. Sets up the single-DOF Ruckig path parameter s:
+// 0 -> dist for THIS segment. ideal_joint_config is intentionally NOT reset --
+// it holds the continuously integrated joint configuration so chained moves
+// start from the true current configuration (no jump back to home).
+static void initRRMC(const BLA::Matrix<6, 1, float>& goalPose)
+{
+  g_goalPose = goalPose;
+  diff = goalPose - T_home;                 // full 6D pose delta (orientation incl.)
+
+  // Path length drives the time scaling. Use translation distance; for a pure
+  // reorientation (no translation) fall back to rotation magnitude so dist is
+  // never zero. Endpoint is exact either way because (diff/dist)*dist == diff.
+  float transDist = BLA::Norm(diff.Submatrix<3, 1>(0, 0));
+  float rotDist   = BLA::Norm(diff.Submatrix<3, 1>(3, 0));
+  dist = (transDist > 1e-4f) ? transDist : rotDist;
+
+  input.current_position     = {0.0};       // path parameter s starts at 0
+  input.current_velocity     = {0.0};
+  input.current_acceleration = {0.0};
+  input.target_position      = {dist};      // s travels 0 -> path length
+  input.target_velocity      = {0.0};
+  input.target_acceleration  = {0.0};
+  t = 0.0f;
+}
+
+// Produce ONE RRMC frame: advance Ruckig's scalar path parameter s, map it to a
+// full 6D Cartesian pose + twist (orientation included via diff(3..5)), run
+// resolved-rate IK to integrate the joint configuration, and write the
+// ABSOLUTE joint step setpoints into 'frame'. The feeder turns these absolute
+// setpoints into per-window deltas. Returns true once the trajectory finished.
+static bool produceRRMCFrame(JointFrame& frame)
+{
+  res = ruck.update(input, output);
+
+  float s     = output.new_position[0];     // time-parameterised path length
+  float s_dot = output.new_velocity[0];     // path speed
+
+  // Scalar path parameter -> full 6D Cartesian pose & twist.
+  BLA::Matrix<6, 1, float> target_twist = (diff / dist) * s_dot;
+  BLA::Matrix<6, 1, float> target_pose  = T_home + (diff / dist) * s;
+
+  // Resolved-rate IK. Integrates ideal_joint_config (radians) in place; the
+  // returned per-step delta (degrees) is not needed here -- we publish the
+  // integrated ABSOLUTE config instead.
+  getIK_RRMC(ideal_joint_config, target_twist, target_pose);
+
+  frame.q_steps[0] = radToDeg(ideal_joint_config(0, 0)) * Constants::Config::J1_STEPS_PER_DEG;
+  frame.q_steps[1] = radToDeg(ideal_joint_config(1, 0)) * Constants::Config::J2_STEPS_PER_DEG;
+  frame.q_steps[2] = radToDeg(ideal_joint_config(2, 0)) * Constants::Config::J3_STEPS_PER_DEG;
+  frame.q_steps[3] = radToDeg(ideal_joint_config(3, 0)) * Constants::Config::J4_STEPS_PER_DEG;
+  frame.q_steps[4] = radToDeg(ideal_joint_config(4, 0)) * Constants::Config::J5_STEPS_PER_DEG;
+  frame.q_steps[5] = radToDeg(ideal_joint_config(5, 0)) * Constants::Config::J6_STEPS_PER_DEG;
+
+  if (res == Result::Finished) {
+    T_home = g_goalPose;   // segment complete: current pose becomes the goal
+    return true;
+  }
+  return false;
+}
+
 void loop()
 {
   // case 0 --> handle serial --> if serial available --> parse serial and set switch-case to executing
@@ -411,35 +482,31 @@ void loop()
     
     break;
   case RobotState::Executing:
-    if (uxQueueSpacesAvailable(stepperQueue) > 0) 
+    if (uxQueueSpacesAvailable(stepperQueue) > 0)
       {
-        res = ruck.update(input, output);
-        if(res == Result::Finished)
-        {
-          output.pass_to_input(input); // lock current_position to the exact final target
-          g_motionActive = false;      // tell feeder to flush the final partial window
-          currentState = RobotState::Idle;
-          break;
-        }
+        // Run one resolved-rate step: Ruckig advances the scalar path
+        // parameter, RRMC maps it to absolute joint setpoints for all 6 axes.
+        JointFrame j_send;
+        bool finished = produceRRMCFrame(j_send);
 
-        // 2. Prepare the payload BEFORE sending
-        JointFrame j_send = {{0,0,0,0,0,0}};
-        q = output.new_position[0];
-        // NOTE: do NOT print here. A per-frame Serial.printf blocks loop() for
-        // ~ms while the TX buffer drains, starving the real-time pipeline and
-        // causing the HW queue to underrun (stop/start stutter). Diagnose via
-        // the feeder underrun counter instead.
-        j_send.q_steps[5] = radToDeg(q) * Constants::Config::J6_STEPS_PER_DEG;
-        // (Populate other 5 joints here as well)
-
-        // 3. Send it (we already know there is space, so 0 delay is fine)
-        if(xQueueSend(stepperQueue, &j_send, 0) == pdPASS)
+        // Producer is the SOLE sender and we just confirmed space, so this send
+        // never blocks. Advance Ruckig ONLY after the frame is safely queued.
+        // Do NOT re-run produceRRMCFrame on a failed send: getIK_RRMC
+        // integrates ideal_joint_config in place, so a re-run would
+        // double-integrate and corrupt the trajectory.
+        if (xQueueSend(stepperQueue, &j_send, 0) == pdPASS)
         {
-          output.pass_to_input(input); // Advance trajectory state safely
+          output.pass_to_input(input); // advance trajectory state safely
         }
         else
         {
           Serial.println("Queue full");
+        }
+
+        if (finished)
+        {
+          g_motionActive = false;      // tell feeder to flush the final partial window
+          currentState = RobotState::Idle;
         }
       }
     // If no space, do nothing. We will catch up on the next loop iteration.
@@ -505,22 +572,12 @@ void handleSerial()
         targetPose(4, 0) = degToRad(payload[10]); 
         targetPose(5, 0) = degToRad(payload[11]);
 
-        Serial.println(" ----------------------------------- ");
-        // Debug Print
-        Serial.print("Angles -> J1: "); Serial.print(j1_angle, 5);
-        Serial.print(" | J2: "); Serial.print(j2_angle, 5);
-        Serial.print(" | J3: "); Serial.print(j3_angle, 5);
-        Serial.print(" | J4: "); Serial.print(j4_angle, 5);
-        Serial.print(" | J5: "); Serial.print(j5_angle, 5);
-        Serial.print(" | J6: "); Serial.println(j6_angle, 5);
-        
-        Serial.print("Pose   -> X: "); Serial.print(targetPose(0, 0), 5);
-        Serial.print(" | Y: "); Serial.print(targetPose(1, 0), 5);
-        Serial.print(" | Z: "); Serial.print(targetPose(2, 0), 5);
-        Serial.print(" | Rx: "); Serial.print(targetPose(3, 0), 5);
-        Serial.print(" | Ry: "); Serial.print(targetPose(4, 0), 5);
-        Serial.print(" | Rz: "); Serial.println(targetPose(5, 0), 5);
-        Serial.println(" ----------------------------------- ");
+        // Keep this SHORT. handleSerial runs on the producer core; a long
+        // Serial.print block here stalls the producer for tens of ms (TX buffer
+        // drain at 115200 baud), starving the pipeline right as a move starts.
+        Serial.printf("CMD pose X:%.3f Y:%.3f Z:%.3f Rx:%.3f Ry:%.3f Rz:%.3f\n",
+                      targetPose(0, 0), targetPose(1, 0), targetPose(2, 0),
+                      targetPose(3, 0), targetPose(4, 0), targetPose(5, 0));
 
         // Update Matrix
         joints(0, 0) = j1_angle;
@@ -530,17 +587,24 @@ void handleSerial()
         joints(4, 0) = j5_angle;
         joints(5, 0) = j6_angle;
 
-        currentState = RobotState::Executing;
-        g_motionActive = true;
-
-        // Do NOT seed current_position from the stepper readback: this is an
-        // open-loop planner and Ruckig already holds its own last position
-        // (kept up to date via output.pass_to_input). Reading the hardware here
-        // couples the planner to any physical drift/runaway and produces a huge
-        // first delta -> ErrorTicksTooLow. Only set the new target.
-        auto trp = degToRad(j6_angle);
-        Serial.printf("Current J6: %f | Target J6: %f\n", input.current_position[0], trp);
-        input.target_position[0] = trp;
+        // Start a resolved-rate Cartesian straight-line move from the current
+        // pose (T_home) to the parsed target pose (already meters / radians).
+        // Guard against a zero-length command so we never divide by zero or
+        // get stuck in Executing with nothing to do.
+        BLA::Matrix<6, 1, float> goalPose = targetPose;
+        BLA::Matrix<6, 1, float> preview  = goalPose - T_home;
+        float previewTrans = BLA::Norm(preview.Submatrix<3, 1>(0, 0));
+        float previewRot   = BLA::Norm(preview.Submatrix<3, 1>(3, 0));
+        if (previewTrans < 1e-4f && previewRot < 1e-4f) {
+          Serial.println("Target pose ~= current pose; nothing to do.");
+          g_motionActive = false;
+          currentState = RobotState::Idle;
+        } else {
+          initRRMC(goalPose);
+          g_motionActive = true;
+          currentState = RobotState::Executing;
+          Serial.printf("RRMC start dist %.3f\n", dist);
+        }
 
         // test();
         // test2();
@@ -674,7 +738,8 @@ void feeder(void *pvParameters)
   static uint32_t last_empty_print_ms = 0;
   while (true)
   {
-    if (xQueueReceive(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS)
+    bool got = (xQueueReceive(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS);
+    if (got)
     {
       // Absorb this frame into the batch accumulator (RAM only, never fails).
       for (int i = 0; i < 6; i++)
@@ -683,56 +748,59 @@ void feeder(void *pvParameters)
         accSteps[i] += delta;
         emitted.q_steps[i] = j_recv.q_steps[i];
       }
-      accTicks += (TICKS_PER_S / 1000);
-
-      // Flush once the busiest joint has enough steps for a smooth evenly
-      // spaced window, or a latency cap is reached (keeps slow motion moving).
-      int32_t mx = 0;
-      for (int i = 0; i < 6; i++) {
-        int32_t a = accSteps[i] < 0 ? -accSteps[i] : accSteps[i];
-        if (a > mx) mx = a;
-      }
-      if (mx >= BATCH_MIN_STEPS || accTicks >= BATCH_MAX_TICKS) {
-        flushBatchWindow();
-      }
+      // Each frame represents TRAJ_DT_S of motion (must match the producer's
+      // Ruckig/IK timestep). Advance the HW-queue window time accordingly.
+      accTicks += (uint32_t)(TICKS_PER_S * TRAJ_DT_S);
     }
-    else
+    else if (g_motionActive)
     {
-      // FreeRTOS queue empty right now.
-      // If a motion has truly finished, emit the final partial batch so the
-      // trajectory lands exactly on target.
-      if (!g_motionActive && accTicks > 0) {
-        flushBatchWindow();
-      }
-
-      // KEEP-ALIVE: keep every stepper's HW queue from ever running dry. If a
-      // queue empties, the MCPWM timer halts and latches the device into
-      // DeviceNotReady forever (see note at KEEPALIVE_TICKS). Topping up the
-      // about-to-be-empty queues with a short 0-step pause keeps isRunning()
-      // true so the timer never latches. Holds position exactly.
-      for (int i = 0; i < 6; i++) {
-        if (!steppers[i]->hasTicksInQueue(KEEPALIVE_MIN_TICKS)) {
-          uint32_t dur = KEEPALIVE_TICKS + feederDrift[i];
-          uint32_t actual = 0;
-          MoveTimedResultCode r = steppers[i]->moveTimed(0, dur, &actual, true);
-          if (r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
-            feederDrift[i] = dur - actual; // carry leftover ticks forward
-          }
+      // Mid-motion gap: no frame arrived within 1ms while a motion is active
+      // (producer momentarily behind, or stalled on a Serial print). The
+      // unconditional keep-alive below bridges it; just record for visibility.
+      underrun_count++;
+      if (millis() - last_empty_print_ms >= 1000) {
+        last_empty_print_ms = millis();
+        if (underrun_count > 0) {
+          Serial.printf("UNDERRUN: queue starved %u times in last 1s\n", underrun_count);
+          underrun_count = 0;
         }
       }
+    }
 
-      if (g_motionActive)
-      {
-        // Producer fell behind == real-time underrun. The keep-alive above
-        // bridges the gap (a brief pause) instead of latching. Report it
-        // (throttled) so a persistent producer stall is still visible.
-        underrun_count++;
-        if (millis() - last_empty_print_ms >= 1000) {
-          last_empty_print_ms = millis();
-          if (underrun_count > 0) {
-            Serial.printf("UNDERRUN: queue starved %u times in last 1s\n", underrun_count);
-            underrun_count = 0;
-          }
+    // ---- Maintain HW-queue lookahead EVERY iteration (drain protection) ----
+    // Is any stepper's HW queue about to run dry?
+    bool hwLow = false;
+    for (int i = 0; i < 6; i++) {
+      if (!steppers[i]->hasTicksInQueue(KEEPALIVE_MIN_TICKS)) { hwLow = true; break; }
+    }
+    // Busiest joint's accumulated step count -> decides a step-rich flush.
+    int32_t mx = 0;
+    for (int i = 0; i < 6; i++) {
+      int32_t a = accSteps[i] < 0 ? -accSteps[i] : accSteps[i];
+      if (a > mx) mx = a;
+    }
+    // Flush the accumulated window when it is step-rich (smooth), a latency cap
+    // is hit, the motion just finished, OR a HW queue is starving. The hwLow
+    // term is the critical fix: during active streaming the feeder used to stay
+    // in the receive branch and only flush on step/latency thresholds, so the
+    // HW queue could drain to empty between flushes and latch the timer into
+    // DeviceNotReady. Now any impending starvation forces a flush.
+    bool finishing = (!g_motionActive && accTicks > 0);
+    if (accTicks > 0 && (mx >= BATCH_MIN_STEPS || accTicks >= BATCH_MAX_TICKS || hwLow || finishing)) {
+      flushBatchWindow();
+    }
+
+    // After any flush, pad any STILL-idle joint whose queue is low with a short
+    // 0-step pause so its MCPWM timer never empties and latches. Runs every
+    // iteration (both branches) -- confining this to the FreeRTOS-empty branch
+    // was the bug that let the queue drain and latch mid-motion.
+    for (int i = 0; i < 6; i++) {
+      if (!steppers[i]->hasTicksInQueue(KEEPALIVE_MIN_TICKS)) {
+        uint32_t dur = KEEPALIVE_TICKS + feederDrift[i];
+        uint32_t actual = 0;
+        MoveTimedResultCode r = steppers[i]->moveTimed(0, dur, &actual, true);
+        if (r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
+          feederDrift[i] = dur - actual; // carry leftover ticks forward
         }
       }
     }

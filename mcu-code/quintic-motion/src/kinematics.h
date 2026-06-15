@@ -228,7 +228,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float>& c
     float dampening_factor = 0.01f; // Adjust as needed for stability
     // float max_step = 0.3f; // Max ~2.8 degrees per step
     float gain = 5.0f;
-    float dt = 0.001f; // control loop rate 
+    float dt = TRAJ_DT_S; // control loop rate (shared trajectory timestep)
     BLA::Matrix<6, 1, float> current_pose;
     BLA::Matrix<6, 1, float> q_delta;
      BLA::Matrix<6, 1, float> qdot;

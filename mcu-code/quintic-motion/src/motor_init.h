@@ -67,12 +67,12 @@ namespace Constants {
         constexpr float J5_HOLD_MULTIPLIER = 0.5f;
         constexpr float J6_HOLD_MULTIPLIER = 0.5f;
 
-        constexpr uint32_t J1_TPWMTHRS = 100*0;
-        constexpr uint32_t J2_TPWMTHRS = 100*0;
-        constexpr uint32_t J3_TPWMTHRS = 100*0;
-        constexpr uint32_t J4_TPWMTHRS = 50*0;
-        constexpr uint32_t J5_TPWMTHRS = 50*0;
-        constexpr uint32_t J6_TPWMTHRS = 50*1;
+        constexpr uint32_t J1_TPWMTHRS = 100*1;
+        constexpr uint32_t J2_TPWMTHRS = 100*1;
+        constexpr uint32_t J3_TPWMTHRS = 100*1;
+        constexpr uint32_t J4_TPWMTHRS = 50*1;
+        constexpr uint32_t J5_TPWMTHRS = 50*1;
+        constexpr uint32_t J6_TPWMTHRS = 100*1;
 
         constexpr uint16_t J1_MICOSTEPS = 8;
         constexpr uint16_t J2_MICOSTEPS = 8;
