@@ -10,7 +10,6 @@
 #include <helper_functions.h>
 #include <structs.h>
 #include <motion_planner.h>
-#include <dda_stepper.h>
 
 
 // ================= UART PINS =================
@@ -40,29 +39,6 @@ void test2();
 void test3();
 void test4();
 void handleSerial();
-
-// ================= DDA STEPPER CONFIG =================
-// Pin order J1..J6, matching Constants::Pins. Direction polarity mirrors the
-// FastAccelStepper setDirectionPin() flags used for homing so "positive" means
-// the same physical direction in both modes.
-static const uint8_t DDA_STEP_PINS[6] = {
-    Constants::Pins::J1_STEP_PIN, Constants::Pins::J2_STEP_PIN, Constants::Pins::J3_STEP_PIN,
-    Constants::Pins::J4_STEP_PIN, Constants::Pins::J5_STEP_PIN, Constants::Pins::J6_STEP_PIN};
-static const uint8_t DDA_DIR_PINS[6] = {
-    Constants::Pins::J1_DIR_PIN, Constants::Pins::J2_DIR_PIN, Constants::Pins::J3_DIR_PIN,
-    Constants::Pins::J4_DIR_PIN, Constants::Pins::J5_DIR_PIN, Constants::Pins::J6_DIR_PIN};
-// dir_high_is_positive per axis (2nd arg passed to setDirectionPin during setup)
-static const bool DDA_DIR_POS[6] = {false, true, true, false, false, false};
-// steps-per-degree per axis, indexed J1..J6, for the control loop conversions.
-static const float DDA_SPD[6] = {
-    Constants::Config::J1_STEPS_PER_DEG, Constants::Config::J2_STEPS_PER_DEG,
-    Constants::Config::J3_STEPS_PER_DEG, Constants::Config::J4_STEPS_PER_DEG,
-    Constants::Config::J5_STEPS_PER_DEG, Constants::Config::J6_STEPS_PER_DEG};
-// Control-loop cadence: feed new velocities to the DDA at this rate. Must match
-// the Ruckig timestep (ruck(0.001) in motion_planner.h).
-constexpr float    CONTROL_DT_S  = 0.001f;
-constexpr uint32_t CONTROL_DT_US = 1000;
-static uint32_t    last_control_us = 0;
 
 void setup()
 {   
@@ -142,18 +118,9 @@ void setup()
 
     setupRuckig();
 
-    // ---- Hand the step/dir pins from FastAccelStepper to the DDA generator ----
-    // Homing is done; release the MCPWM/RMT routing so we can drive the pins as
-    // raw GPIO from the 100 kHz DDA ISR, then start the timer.
-    for (int i = 0; i < 6; ++i) {
-        steppers[i]->forceStop();
-        steppers[i]->detachFromPin();
-    }
-    dda::init(DDA_STEP_PINS, DDA_DIR_PINS, DDA_DIR_POS);
-    for (int i = 0; i < 6; ++i) dda::setPosition(i, 0); // homed == 0
-    dda::start();
-    last_control_us = micros();
-    Serial.println("--- DDA stepper engine started (100 kHz) ---");
+    xTaskCreatePinnedToCore(feeder, "Queue Feeder", 4096, NULL, 5, NULL, 0);
+
+    
 }
 
 
@@ -426,37 +393,37 @@ void loop()
     
     break;
   case RobotState::Executing:
-    {
-      // Hold the control cadence so Ruckig steps at its design dt and the
-      // velocity math uses a consistent CONTROL_DT_S.
-      uint32_t now = micros();
-      if ((uint32_t)(now - last_control_us) < CONTROL_DT_US) break;
-      last_control_us += CONTROL_DT_US;
+    if (uxQueueSpacesAvailable(stepperQueue) > 0) 
+      {
+        res = ruck.update(input, output);
+        if(res == Result::Finished)
+        {
+          output.pass_to_input(input); // lock current_position to the exact final target
+          currentState = RobotState::Idle;
+          break;
+        }
 
-      res = ruck.update(input, output);
-      output.pass_to_input(input); // advance trajectory state
+        // 2. Prepare the payload BEFORE sending
+        JointFrame j_send = {{0,0,0,0,0,0}};
+        q = output.new_position[0];
+        // NOTE: do NOT print here. A per-frame Serial.printf blocks loop() for
+        // ~ms while the TX buffer drains, starving the real-time pipeline and
+        // causing the HW queue to underrun (stop/start stutter). Diagnose via
+        // the feeder underrun counter instead.
+        j_send.q_steps[5] = radToDeg(q) * Constants::Config::J6_STEPS_PER_DEG;
+        // (Populate other 5 joints here as well)
 
-      // Feedforward the jerk-limited Ruckig VELOCITY (this is what carries the
-      // acceleration profile), plus a SMALL position trim to cancel drift.
-      // Do NOT use (target-emitted)/dt: that deadbeat gain multiplies the +-1
-      // step quantisation of `emitted` by 1/dt (=1000), which is what produced
-      // the huge step-interval jitter and masked the acceleration profile.
-      float   ff_sps       = radToDeg(output.new_velocity[0]) * DDA_SPD[5];
-      int32_t target_steps = (int32_t)(radToDeg(output.new_position[0]) * DDA_SPD[5]);
-      int32_t err          = target_steps - dda::getPosition(5);
-
-      // Stop cleanly once the trajectory is finished AND the DDA has caught up.
-      if (res == Result::Finished && err > -2 && err < 2) {
-        dda::setVelocity(5, 0.0f);
-        currentState = RobotState::Idle;
-        break;
+        // 3. Send it (we already know there is space, so 0 delay is fine)
+        if(xQueueSend(stepperQueue, &j_send, 0) == pdPASS)
+        {
+          output.pass_to_input(input); // Advance trajectory state safely
+        }
+        else
+        {
+          Serial.println("Queue full");
+        }
       }
-
-      // Gentle drift correction only: a 1-step error adds just POS_TRIM steps/s,
-      // not 1000. Closes accumulated error over ~tens of ms without adding noise.
-      constexpr float POS_TRIM = 25.0f; // [1/s]
-      dda::setVelocity(5, ff_sps + POS_TRIM * (float)err);
-    }
+    // If no space, do nothing. We will catch up on the next loop iteration.
     break;
 
   
@@ -578,3 +545,99 @@ void handleSerial()
 }
 
 
+
+
+JointFrame emitted = {{0,0,0,0,0,0}};
+bool primed = false;
+
+void feeder(void *pvParameters)
+{
+  JointFrame j_recv = {{0,0,0,0,0,0}};
+  while (true)
+  {
+    // PEEK (don't remove) so a frame is only popped AFTER it is fully appended
+    // to all 6 hardware queues. Removing it up-front (the old bug) dropped the
+    // frame whenever the HW queue was full, collapsing the trajectory timing.
+    if(xQueuePeek(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS)
+    {
+      bool fault_detected = false;
+      bool need_retry = false;
+      for (int i = 0; i < 6; i++)
+      {
+        int32_t delta = j_recv.q_steps[i] - emitted.q_steps[i];
+        MoveTimedResultCode r = steppers[i]->moveTimed(delta, TICKS_PER_S / 1000, NULL, true);
+        if(r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
+          // Appended OK. MoveEmpty == appended but HW queue had run empty
+          // (a mild underrun) -- still a success, so advance emitted.
+          emitted.q_steps[i] += delta;
+        } else if (static_cast<int8_t>(r) > 0)
+        {
+          need_retry = true; // QueueFull / Busy: append FAILED -> retry same frame
+        }
+        else if (static_cast<int>(r) < 0)
+        { 
+          fault_detected = true;
+          Serial.printf("FAULT! moveTimed error on Joint %d. Error Code: %d\n", i, static_cast<int>(r));
+        }
+        
+      }
+      if (fault_detected) {
+        Serial.println("Executing Emergency Stop across all axes...");
+        
+        for (int j = 0; j < 6; j++) {
+           steppers[j]->stopMove(); // Immediately halt pulse generation
+        }
+
+        // Flush the FreeRTOS queue so we don't accidentally execute stale commands later
+        xQueueReset(stepperQueue);
+        fault_detected = false; // Reset fault flag after handling
+        
+        // Optionally: Set a global atomic flag here to tell Core 0 to stop planning
+        // is_trajectory_active = false;
+      }
+    
+      if (need_retry)
+      {
+        // HW queues are full: do NOT pop the peeked frame. Wait ~1ms for the
+        // silicon timer to drain one slot, then re-peek and retry the SAME
+        // frame. This 1ms wait is the real-time backpressure that throttles the
+        // feeder to the hardware drain rate (and thus the producer).
+        vTaskDelay(1);
+      }
+      else
+      {
+        // Frame fully appended -> remove it from the queue and advance.
+        xQueueReceive(stepperQueue, &j_recv, 0);
+        primed = true; // mark motion active (for underrun detection)
+      }
+
+      
+    }
+    else
+    {
+      // FreeRTOS queue empty: if we were mid-motion (primed==true) this is a
+      // real-time UNDERRUN -- the producer failed to keep the HW queue fed.
+      // Count and report these so starvation is visible.
+      static uint32_t underrun_count = 0;
+      static uint32_t last_empty_print_ms = 0;
+      if (primed) underrun_count++;
+      if (millis() - last_empty_print_ms >= 1000) {
+        last_empty_print_ms = millis();
+        if (underrun_count > 0) {
+          Serial.printf("UNDERRUN: queue starved %u times in last 1s\n", underrun_count);
+          underrun_count = 0;
+        }
+      }
+      primed = false; // If we hit an empty queue, we should reset the primed status to avoid unintended large moves when new commands come in
+      // for (int i = 0; i < 6; i++)      
+      // {
+      //   MoveTimedResultCode r = steppers[i]->moveTimed(0, TICKS_PER_S / 1000, NULL, true); // Send a zero move with start=true to ensure the queue is running and to reset any internal state in the stepper library
+      //   if (!moveTimedIsOk(r) && allow_print) {
+      //     // Serial.printf("Error sending zero move to Joint %d. Error Code: %d\n", i, r);
+      //   }
+      // }
+    }
+  }
+
+
+}
