@@ -66,7 +66,7 @@ void setup() {
         input.target_velocity[i] = 0.0;
         input.target_acceleration[i] = 0.0;
 
-        input.synchronization = ruckig::Synchronization::Time;
+        input.synchronization = ruckig::Synchronization::Phase;
 
         // The DDS step generator tops out at ~100,000 steps/s. Above that the
         // 32-bit phase increment overflows and the rate collapses to ~0, so the
@@ -77,12 +77,12 @@ void setup() {
         const float MAX_STEP_RATE = 95000.0f;                 // steps/s, safe margin under 100k
         float max_deg_per_s = MAX_STEP_RATE / STEPS_PER_DEG[i];
         input.max_velocity[i]     = degToRad(max_deg_per_s);
-        input.max_acceleration[i] = degToRad(max_deg_per_s) * 1.0;   // reach max vel in ~0.25 s
-        input.max_jerk[i]         = degToRad(max_deg_per_s) * 1.5f;
+        input.max_acceleration[i] = degToRad(max_deg_per_s) * 5.0;   // reach max vel in ~0.25 s
+        input.max_jerk[i]         = degToRad(max_deg_per_s) * 10.0f;
     }
     t0 = 20;
     t1 = 20;
-    t2 = 20;
+    t2 = -20;
     t3 = -90;
     t4 = 90;
     t5 = 90;
