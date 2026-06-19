@@ -72,7 +72,7 @@ namespace Constants {
         constexpr uint32_t J3_TPWMTHRS = 100*0;
         constexpr uint32_t J4_TPWMTHRS = 50*0;
         constexpr uint32_t J5_TPWMTHRS = 50*0;
-        constexpr uint32_t J6_TPWMTHRS = 50*1;
+        constexpr uint32_t J6_TPWMTHRS = 50*0;
 
         constexpr uint16_t J1_MICOSTEPS = 8;
         constexpr uint16_t J2_MICOSTEPS = 8;
