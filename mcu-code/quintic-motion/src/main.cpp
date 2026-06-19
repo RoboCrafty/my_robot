@@ -151,6 +151,13 @@ void loop() {
             float zero_speeds[6] = {0, 0, 0, 0, 0, 0};
             ddsEngine.updateVelocities(zero_speeds);
             output.pass_to_input(input);
+            // HARDWARE SYNC: Overwrite Ruckig's perfect mathematical position with the 
+            // exact physical reality of the hardware steps. This prevents the deadband 
+            // stranding error from accumulating across multiple moves!
+            for(int i = 0; i < 6; i++) {
+                float physical_degrees = (float)ddsEngine.getSteps(i) / STEPS_PER_DEG[i];
+                input.current_position[i] = degToRad(physical_degrees);
+            }
             if (toggle){
                 input.target_position[0] = degToRad(0.0);
                 input.target_position[1] = degToRad(0.0);
