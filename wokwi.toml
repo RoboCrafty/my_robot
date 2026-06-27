@@ -1,0 +1,5 @@
+[wokwi]
+version = 1
+elf = "mcu-code/quintic-motion/.pio/build/esp32dev/firmware.elf"
+firmware = "mcu-code/quintic-motion/.pio/build/esp32dev/firmware.bin"
+rfc2217ServerPort = 4000

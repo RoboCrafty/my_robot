@@ -1,0 +1,43 @@
+{
+  "extensionVersion": "1.5.4",
+  "fileName": "/Users/fudayl/git/my_robot/mcu-code/quintic-motion/wokwi.vcd",
+  "markerTime": 6749647629,
+  "altMarkerTime": null,
+  "displayTimeUnit": "µs",
+  "selectedSignal": {
+    "name": "logic.D4",
+    "msb": -1,
+    "lsb": -1
+  },
+  "zoomRatio": 0.00021237739995316068,
+  "scrollLeft": 6731013827,
+  "defaultPixelTime": 10000000,
+  "displayedSignals": [
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 4,
+      "name": "logic.D4",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 2,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "D4",
+      "renderType": "binary",
+      "valueLinkEnable": false
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 3,
+      "name": "logic.D3",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 2,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "D3",
+      "renderType": "binary",
+      "valueLinkEnable": false
+    }
+  ]
+}

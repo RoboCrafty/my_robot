@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "author": "Fudayl",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 100, "left": 50, "attrs": {} },
+    { "type": "wokwi-logic-analyzer", "id": "logic", "top": 350, "left": 200,  "rotate": -270, "attrs": { "pins": "8" } },
+    
+    { "type": "wokwi-stepper-motor", "id": "m1", "top": -400, "left": -400, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv1", "top": -200, "left": -350, "rotate": 270, "attrs": {} },
+
+    { "type": "wokwi-stepper-motor", "id": "m2", "top": -400, "left": -150, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv2", "top": -200, "left": -100, "rotate": 270, "attrs": {} },
+
+    { "type": "wokwi-stepper-motor", "id": "m3", "top": -400, "left": 100, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv3", "top": -200, "left": 150, "rotate": 270, "attrs": {} },
+
+    { "type": "wokwi-stepper-motor", "id": "m4", "top": -400, "left": 350, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv4", "top": -200, "left": 400, "rotate": 270, "attrs": {} },
+
+    { "type": "wokwi-stepper-motor", "id": "m5", "top": -400, "left": 600, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv5", "top": -200, "left": 650, "rotate": 270, "attrs": {} },
+
+    { "type": "wokwi-stepper-motor", "id": "m6", "top": -400, "left": 850, "attrs": { "size": "17", "arrow": "red", "display": "angle" } },
+    { "type": "wokwi-a4988", "id": "drv6", "top": -200, "left": 900, "rotate": 270, "attrs": {} }
+  ],
+  "connections": [
+    ["esp:GND.1", "logic:GND", "black", []],
+    
+    [ "esp:TX0", "$serialMonitor:RX", "", [] ], 
+    [ "esp:RX0", "$serialMonitor:TX", "", [] ],
+
+    ["esp:D33", "drv1:STEP", "blue", []], ["esp:D32", "drv1:DIR", "orange", []],
+    ["drv1:SLEEP", "drv1:RESET", "green", []],
+    ["m1:B-", "drv1:1B", "green", []], ["m1:B+", "drv1:1A", "gold", []], ["m1:A+", "drv1:2A", "blue", []], ["m1:A-", "drv1:2B", "red", []],
+    ["esp:D33", "logic:D0", "blue", []],
+
+    ["esp:D13", "drv2:STEP", "blue", []], ["esp:D12", "drv2:DIR", "orange", []],
+    ["drv2:SLEEP", "drv2:RESET", "green", []],
+    ["m2:B-", "drv2:1B", "green", []], ["m2:B+", "drv2:1A", "gold", []], ["m2:A+", "drv2:2A", "blue", []], ["m2:A-", "drv2:2B", "red", []],
+    ["esp:D13", "logic:D1", "blue", []],
+
+    ["esp:D19", "drv3:STEP", "blue", []], ["esp:D21", "drv3:DIR", "orange", []],
+    ["drv3:SLEEP", "drv3:RESET", "green", []],
+    ["m3:B-", "drv3:1B", "green", []], ["m3:B+", "drv3:1A", "gold", []], ["m3:A+", "drv3:2A", "blue", []], ["m3:A-", "drv3:2B", "red", []],
+    ["esp:D19", "logic:D2", "blue", []],
+
+    ["esp:D14", "drv4:STEP", "blue", []], ["esp:D27", "drv4:DIR", "orange", []],
+    ["drv4:SLEEP", "drv4:RESET", "green", []],
+    ["m4:B-", "drv4:1B", "green", []], ["m4:B+", "drv4:1A", "gold", []], ["m4:A+", "drv4:2A", "blue", []], ["m4:A-", "drv4:2B", "red", []],
+    ["esp:D14", "logic:D3", "blue", []],
+
+    ["esp:D22", "drv5:STEP", "blue", []], ["esp:D23", "drv5:DIR", "orange", []],
+    ["drv5:SLEEP", "drv5:RESET", "green", []],
+    ["m5:B-", "drv5:1B", "green", []], ["m5:B+", "drv5:1A", "gold", []], ["m5:A+", "drv5:2A", "blue", []], ["m5:A-", "drv5:2B", "red", []],
+    ["esp:D22", "logic:D4", "blue", []],
+
+    ["esp:D26", "drv6:STEP", "blue", []], ["esp:D25", "drv6:DIR", "orange", []],
+    ["drv6:SLEEP", "drv6:RESET", "green", []],
+    ["m6:B-", "drv6:1B", "green", []], ["m6:B+", "drv6:1A", "gold", []], ["m6:A+", "drv6:2A", "blue", []], ["m6:A-", "drv6:2B", "red", []],
+    ["esp:D26", "logic:D5", "blue", []]
+  ]
+}
