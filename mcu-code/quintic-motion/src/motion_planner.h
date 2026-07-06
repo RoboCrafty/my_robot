@@ -11,8 +11,8 @@ inline OutputParameter<DOFs> output;
 
 inline void setupRuckig() 
 {
-    input.max_velocity = {0.50};       
-    input.max_acceleration = {5.50}; 
+    input.max_velocity = {1.0}; // rads/sec
+    input.max_acceleration = {5.50};  // rads/secˆ2
     input.max_jerk = {10.0};         
 
     input.current_position = {0.0};

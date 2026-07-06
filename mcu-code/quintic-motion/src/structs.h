@@ -4,7 +4,12 @@ struct Joints {
     float q1, q2, q3, q4, q5, q6;
 };
 struct JointFrame {
-    int32_t q_steps[6];   
+    float q[6];   
+};
+struct JointCmd{
+    int32_t steps_to_send;
+    float step_accumulator;
+    float last_target_pos;
 };
 struct Pose {
     float x, y, z, rx, ry, rz;

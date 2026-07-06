@@ -12,6 +12,7 @@
 #include <motion_planner.h>
 
 
+
 // ================= UART PINS =================
 #define TMC_RX 15
 #define TMC_TX 4
@@ -28,7 +29,7 @@ BLA::Matrix<6, 1, float> targetPose;
 BLA::Matrix<6, 1, float> IK_result_container;
 BLA::Matrix<4, 4, float> T0_ee_result;
 
-auto stepperQueue = xQueueCreate(10, sizeof(JointFrame));
+auto stepperQueue = xQueueCreate(5, sizeof(JointFrame));
 void feeder(void *pvParameters);
 
 
@@ -42,7 +43,8 @@ void handleSerial();
 
 void setup()
 {   
-    Serial.begin(115200);
+    Serial.begin(921600);
+    Serial.readBytes
     Serial1.begin(115200, SERIAL_8N1, TMC_RX, TMC_TX);
     Serial2.begin(115200, SERIAL_8N1, TMC2_RX, TMC2_TX);
 
@@ -100,9 +102,9 @@ void setup()
     // homeAxis(2);
     // homeAxis(3);
     // homeAxis(4);
-    homeAxis(6);
+    // homeAxis(6);
     // homeAxis(5);
-    delay(3000); // Wait for homing to complete
+    // delay(3000); // Wait for homing to complete
     steppers[0]->setCurrentPosition(0);
     steppers[1]->setCurrentPosition(0);
     steppers[2]->setCurrentPosition(0);
@@ -367,7 +369,7 @@ t+=0.001;
 
 }
 
-float q, qdot, prevq;
+float q, qdot, qddot, prevq;
 float idealj5;
 bool first_call = true;
 // move j5 from 0 to -90 with jerk limited profile to test movetimed function
@@ -378,7 +380,10 @@ enum class RobotState {
     Error,
     Homing
 };
-RobotState currentState;
+RobotState currentState = RobotState::Executing;
+float targets[8]= {3.14, 0, 3.14, 0, 3.14, 0, 3.14, 0};
+int target_ctr = -1;
+int itr = 0;
 void loop()
 {
   // case 0 --> handle serial --> if serial available --> parse serial and set switch-case to executing
@@ -388,24 +393,42 @@ void loop()
   switch (currentState)
   {
   case RobotState::Idle:
-    handleSerial();
+    // handleSerial();
+    currentState = RobotState::Executing;
     
     
     break;
   case RobotState::Executing:
     if (uxQueueSpacesAvailable(stepperQueue) > 0) 
+    // if (1) 
       {
         res = ruck.update(input, output);
         if(res == Result::Finished)
         {
+          target_ctr++;
+          if(target_ctr == 8){target_ctr = 0;}
           output.pass_to_input(input); // lock current_position to the exact final target
-          currentState = RobotState::Idle;
+          // currentState = RobotState::Idle;
+          input.target_position[0] = targets[target_ctr];
+          
           break;
         }
 
         // 2. Prepare the payload BEFORE sending
         JointFrame j_send = {{0,0,0,0,0,0}};
         q = output.new_position[0];
+        qdot = output.new_velocity[0];
+        qddot = output.new_acceleration[0];
+        if(1)
+        // if(itr > 10)
+        {
+        Serial.printf("%f, %f, %f", t, q, radToDeg(q) * Constants::Config::J6_STEPS_PER_DEG);
+        Serial.println();
+        itr = 0;
+        }
+        t += 0.001;
+        itr++;
+        
         // NOTE: do NOT print here. A per-frame Serial.printf blocks loop() for
         // ~ms while the TX buffer drains, starving the real-time pipeline and
         // causing the HW queue to underrun (stop/start stutter). Diagnose via
@@ -414,6 +437,7 @@ void loop()
         // (Populate other 5 joints here as well)
 
         // 3. Send it (we already know there is space, so 0 delay is fine)
+        // if(1)
         if(xQueueSend(stepperQueue, &j_send, 0) == pdPASS)
         {
           output.pass_to_input(input); // Advance trajectory state safely
@@ -423,6 +447,10 @@ void loop()
           Serial.println("Queue full");
         }
       }
+      // else
+      // {
+      //   Serial.println("Queue full");
+      // }
     // If no space, do nothing. We will catch up on the next loop iteration.
     break;
 
@@ -549,22 +577,45 @@ void handleSerial()
 
 JointFrame emitted = {{0,0,0,0,0,0}};
 bool primed = false;
+JointCmd* stepper_cmds[6];
+
 
 void feeder(void *pvParameters)
 {
-  JointFrame j_recv = {{0,0,0,0,0,0}};
+  JointFrame target = {{0,0,0,0,0,0}};
   while (true)
   {
     // PEEK (don't remove) so a frame is only popped AFTER it is fully appended
     // to all 6 hardware queues. Removing it up-front (the old bug) dropped the
     // frame whenever the HW queue was full, collapsing the trajectory timing.
-    if(xQueuePeek(stepperQueue, &j_recv, pdMS_TO_TICKS(1)) == pdPASS)
+    if(xQueuePeek(stepperQueue, &target, pdMS_TO_TICKS(1)) == pdPASS)
     {
       bool fault_detected = false;
       bool need_retry = false;
+      for (int i = 0; i < 6; i++){
+        // extract target qs and accumulate it in stepper_cmds
+        // if accumulator is more than or equal to 1 then update steps to send 
+        // steps to send are eg: if accumulator is 2.5 then 2 steps or if accumulator is 1.4 then 1 steps then also update 
+        // the accumulator by subtracting the interger steps
+        float delta = target.q[i] - stepper_cmds[i]->last_target_pos;
+        stepper_cmds[i]->last_target_pos = target.q[i];
+        
+        stepper_cmds[i]->step_accumulator += delta;
+        stepper_cmds[i]->steps_to_send = (int32_t)stepper_cmds[i]->step_accumulator;
+        stepper_cmds[i]->step_accumulator -= (float)stepper_cmds[i]->steps_to_send;
+
+        if (stepper_cmds[i]->step_accumulator >= 1.0){
+          stepper_cmds[i]->steps_to_send = 
+        }
+
+      }
       for (int i = 0; i < 6; i++)
       {
-        int32_t delta = j_recv.q_steps[i] - emitted.q_steps[i];
+        
+        
+        
+
+
         MoveTimedResultCode r = steppers[i]->moveTimed(delta, TICKS_PER_S / 1000, NULL, true);
         if(r == MoveTimedResultCode::OK || r == MoveTimedResultCode::MoveEmpty) {
           // Appended OK. MoveEmpty == appended but HW queue had run empty
@@ -607,7 +658,7 @@ void feeder(void *pvParameters)
       else
       {
         // Frame fully appended -> remove it from the queue and advance.
-        xQueueReceive(stepperQueue, &j_recv, 0);
+        xQueueReceive(stepperQueue, &target, 0);
         primed = true; // mark motion active (for underrun detection)
       }
 
