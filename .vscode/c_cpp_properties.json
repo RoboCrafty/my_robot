@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/pinocchioIncludes/**",
+                "/opt/homebrew/opt/pinocchio/include",
+                "/opt/homebrew/opt/boost/include",
+                "/opt/homebrew/Cellar/urdfdom_headers/3.0.1/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c17",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "macos-clang-arm64"
+        }
+    ],
+    "version": 4
+}
