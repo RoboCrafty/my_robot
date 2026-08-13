@@ -15,6 +15,15 @@ struct TrigValues {
     float c1, c2, c3, c4, c5, c6;
 };
 
+#pragma pack(push, 1) // Force exact byte alignment
+struct EspToPiPacket {
+    int32_t actual_position[6]; // 24 bytes
+};
+
+struct PiToEspPacket {
+    float v_cmd[6];             // 24 bytes
+};
+#pragma pack(pop)
 
 // Toggle this: 1 to enable debug prints, 0 to disable completely
 #define DEBUG_MODE 0
