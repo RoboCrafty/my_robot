@@ -17,11 +17,11 @@ struct TrigValues {
 
 #pragma pack(push, 1) // Force exact byte alignment
 struct EspToPiPacket {
-    int32_t actual_position[6]; // 24 bytes
+    float actual_position[6]; // 24 bytes
 };
 
 struct PiToEspPacket {
-    float v_cmd[6];             // 24 bytes
+    float   v_cmd[6];           // Velocity feedforward in steps/sec (24 bytes)
 };
 #pragma pack(pop)
 

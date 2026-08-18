@@ -1,51 +1,124 @@
 #include <iostream>
-#include <fcntl.h>
-#include <termios.h>
-#include <unistd.h>
 #include <time.h>
+#include <iomanip>
+#include <cstdint>
+#include <serialib.h>
+
+#include <ruckig/ruckig.hpp>
+
+#define SERIAL_PORT "/dev/ttyUSB0"
 
 #pragma pack(push, 1) // Force exact byte alignment
 struct EspToPiPacket {
-    int32_t actual_position[6]; // 24 bytes
+    float actual_position[6]; // 24 bytes
 };
 
 struct PiToEspPacket {
-    float v_cmd[6];             // 24 bytes
+    float   v_cmd[6];           // Velocity feedforward in steps/sec (24 bytes)
 };
 #pragma pack(pop)
+
+using namespace ruckig;
+const int DOFs = 6;
+inline Ruckig<DOFs> ruck(0.002);
+inline InputParameter<DOFs> input;
+inline OutputParameter<DOFs> output;
+const float K_P = 20.0f;
+
 int main() {
-    // 1. Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
-    int serial_fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_NDELAY);
-    
-    struct termios options;
-    tcgetattr(serial_fd, &options);
-    cfsetispeed(&options, B1000000); // 1 Mbps baud rate
-    cfsetospeed(&options, B1000000);
-    options.c_cflag = CS8 | CREAD | CLOCAL; // 8n1
-    options.c_iflag = 0;
-    options.c_oflag = 0;
-    options.c_lflag = 0; // Raw mode
-    tcsetattr(serial_fd, TCSANOW, &options);
+    // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
+    serialib serial;
+
+    // Connection to serial port
+    if (serial.openDevice(SERIAL_PORT, 921600) != 1) {
+        std::cerr << "Failed to open serial port!" << std::endl;
+        return 1;
+    }
+    std::cout << "Successful connection to " << SERIAL_PORT << std::endl;
 
     PiToEspPacket tx_packet = {0};
     EspToPiPacket rx_packet = {0};
+
+    // 1. Synchronize Initial Position
+    // The ESP32 only replies when we send something. Send a dummy zero-velocity packet.
+    serial.writeBytes(&tx_packet, sizeof(tx_packet));
+    serial.readBytes(&rx_packet, sizeof(rx_packet), 100); // 100ms timeout
+
+    for (int i = 0; i < DOFs; i++) {
+        float initial_rads = rx_packet.actual_position[i];
+        input.current_position[i] = initial_rads;
+        input.current_velocity[i] = 0.0;
+        input.current_acceleration[i] = 0.0;
+        
+        // Default target to where we currently are
+        input.target_position[i] = initial_rads; 
+        input.target_velocity[i] = 0.0;
+        input.target_acceleration[i] = 0.0;
+
+        input.max_velocity[i] = 114.0;       // ~114 deg/s
+        input.max_acceleration[i] = 200.0;   // ~229 deg/s^2
+        input.max_jerk[i] = 500.0;          // Jerk limiting for smooth S-curves
+    }
+
+    // 2. Read Target Angle from User (Pauses execution here)
+    std::cout << "Enter target angle for Joint 6: ";
+    float target_angle = 0.0f;
+    std::cin >> target_angle;
+    input.target_position[5] = target_angle; // Update J6 target
+    
+    std::cout << "\nStarting 500Hz communication..." << std::endl;
+    std::cout << "Press Ctrl+C to exit." << std::endl;
+    std::cout << "--------------------------------------------------------------------------------" << std::endl;
+
+    serial.flushReceiver();
 
     struct timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
 
     while (true) {
+
+        auto res = ruck.update(input, output);
+        
+        // Pass output state to the next cycle's input
+        input.current_position = output.new_position;
+        input.current_velocity = output.new_velocity;
+        input.current_acceleration = output.new_acceleration;
+
+        // --- 1. CONTROL LOOP & UNIT CONVERSION ---
+        for(int i = 0; i < DOFs; i++) {
+            // Convert actual hardware steps to radians
+            float actual_pos_deg = rx_packet.actual_position[i];
+            
+            // Calculate error
+            float pos_error = output.new_position[i] - actual_pos_deg;
+            
+            // Calculate command velocity (Feedforward + Proportional Error)
+            float cmd_vel_deg = output.new_velocity[i] + (K_P * pos_error);
+            
+            // Convert to steps/sec and assign to TX packet
+            tx_packet.v_cmd[i] = cmd_vel_deg;
+        }
+        output.pass_to_input(input);
+
         // 2. Send Velocity Command
-        write(serial_fd, &tx_packet, sizeof(tx_packet));
+        serial.writeBytes(&tx_packet, sizeof(tx_packet));
 
         // 3. Wait for ESP32 Reply (Blocking read or polling)
-        int bytes_read = 0;
-        while (bytes_read < sizeof(rx_packet)) {
-            int result = read(serial_fd, ((uint8_t*)&rx_packet) + bytes_read, sizeof(rx_packet) - bytes_read);
-            if (result > 0) bytes_read += result;
+        int result = serial.readBytes(&rx_packet, sizeof(rx_packet), 1);
+        if (result != sizeof(rx_packet)) {
+            std::cerr << "\nWarning: Packet dropped or timeout reached!" << std::endl;
+            // You might want to 'continue;' here to skip processing bad data
         }
 
         // 4. Process rx_packet here...
-        // ...
+        std::cout << "\n" 
+                  << "J1: " << std::setw(6) << rx_packet.actual_position[0] << " | "
+                  << "J2: " << std::setw(6) << rx_packet.actual_position[1] << " | "
+                  << "J3: " << std::setw(6) << rx_packet.actual_position[2] << " | "
+                  << "J4: " << std::setw(6) << rx_packet.actual_position[3] << " | "
+                  << "J5: " << std::setw(6) << rx_packet.actual_position[4] << " | "
+                  << "J6: " << std::setw(6) << rx_packet.actual_position[5] 
+                  << "        " << std::endl; // <-- Extra spaces here
 
         // 5. Sleep exactly until the next 2ms interval (500 Hz)
         next_tick.tv_nsec += 2000000; // Add 2ms
@@ -56,6 +129,6 @@ int main() {
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_tick, NULL);
     }
 
-    close(serial_fd);
+    serial.closeDevice();
     return 0;
 }

@@ -60,17 +60,18 @@ uint8_t prevRampState[6] = {0, 0, 0, 0, 0, 0};
 const float axisVelScaleFactor = 1.0f;
 
 void setup() {
-    Serial.begin(1000000);
+    Serial.begin(921600);
+    Serial.setTimeout(2);
     Serial1.begin(115200, SERIAL_8N1, TMC_RX, TMC_TX);
     Serial2.begin(115200, SERIAL_8N1, TMC2_RX, TMC2_TX);
 
     // Initialise
     delay(1000);
-    Serial.println("\n--- Initializing System ---");
+    // Serial.println("\n--- Initializing System ---");
     delay(100);
 
     // initJoints(1, 1, 1, 1, 1, 1, 1);
-    initJoints(1, 0, 0, 0, 0, 0, 0);
+    initJoints(1, 0, 0, 0, 0, 0, 1);
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
@@ -93,7 +94,7 @@ void setup() {
     // homeAxis(2);
     // homeAxis(3);
     // homeAxis(4);
-    // homeAxis(6);
+    homeAxis(6);
     // homeAxis(5);
     delay(3000); // Wait for homing to complete
 
@@ -101,8 +102,8 @@ void setup() {
 
     for (int i = 0; i < 6; i++) {
 
-        steppers[i]->setAcceleration(15000);
-        steppers[i]->setSpeedInHz(10000);        // safe initial speed
+        steppers[i]->setAcceleration(100000);
+        steppers[i]->setSpeedInHz(00000);        // safe initial speed
         steppers[i]->applySpeedAcceleration();
         steppers[i]->setCurrentPosition(0);
     }
@@ -120,7 +121,7 @@ void setup() {
     t5 = 150;
 
 
-    last_loop_time = micros();
+    last_loop_time = millis();
 }
 
 
@@ -130,26 +131,55 @@ EspToPiPacket tx_packet;
 
 void loop() {
      unsigned long current_time = millis();
-    if (Serial1.available() >= sizeof(PiToEspPacket)) {
+    if (Serial.available() >= sizeof(PiToEspPacket)) {
         
         // 2. Read the velocity commands
-        Serial1.readBytes((uint8_t*)&rx_packet, sizeof(PiToEspPacket));
-        
+        Serial.readBytes((uint8_t*)&rx_packet, sizeof(PiToEspPacket));
         // 3. Process velocity (rx_packet.v_cmd) and update motors
-        // ...
+        for(int i = 0; i < 6; i++) {
+            float cmd_vel = rx_packet.v_cmd[i] * STEPS_PER_DEG[i];
+            
+            // Convert float Hz to integer milliHz for maximum resolution
+            uint32_t speed_mHz = (uint32_t)(abs(cmd_vel) * 1000.0f); 
+            
+            if (speed_mHz == 0) {
+                // Stop immediately if the Pi commands 0 velocity
+                steppers[i]->stopMove(); 
+            } else {
+                steppers[i]->setSpeedInMilliHz(speed_mHz);
+                
+                // Apply the speed change instantly while the motor is running
+                steppers[i]->applySpeedAcceleration(); 
+                
+                // Command direction based on the sign of the velocity
+                if (cmd_vel > 0) {
+                    steppers[i]->runForward();
+                } else {
+                    steppers[i]->runBackward();
+                }
+            }
+        }
         
+        
+       
+
         // 4. Read actual hardware positions into tx_packet
         for(int i=0; i<6; i++) {
-            tx_packet.actual_position[i] = steppers[i]->getCurrentPosition();
+            tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
         }
         
         // 5. Send positions back to Pi immediately
-        Serial1.write((uint8_t*)&tx_packet, sizeof(EspToPiPacket));
+        Serial.write((uint8_t*)&tx_packet, sizeof(EspToPiPacket));
     }
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
         
     }
+
+}
+
+void moveJoint()
+{
 
 }
