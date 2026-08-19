@@ -1,6 +1,33 @@
 #pragma once
 
-#include "protocol.h"   // EspToPiPacket / PiToEspPacket + framing helpers
+#include <stdint.h>
+#include <stddef.h>
+
+// --- Pi <-> ESP32 packet layout (MUST match the Raspberry Pi protocol.h) ---
+#pragma pack(push, 1) // exact byte alignment across both platforms
+struct EspToPiPacket {
+    float actual_position[6]; // 24 bytes
+};
+
+struct PiToEspPacket {
+    float pos_cmd[6];         // Absolute target position, deg (24 bytes)
+    float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
+};
+#pragma pack(pop)
+
+// CRC16-CCITT (poly 0x1021, init 0xFFFF). PacketSerial does the COBS framing;
+// this verifies the payload inside a frame wasn't corrupted on the wire.
+inline uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 struct Joints {
     float q1, q2, q3, q4, q5, q6;

@@ -22,7 +22,8 @@ struct EspToPiPacket {
 };
 
 struct PiToEspPacket {
-    float v_cmd[6];           // Velocity command, deg/s (24 bytes)
+    float pos_cmd[6];         // Absolute target position, deg (24 bytes)
+    float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
 };
 #pragma pack(pop)
 

@@ -64,6 +64,14 @@ const float axisVelScaleFactor = 1.0f;
 PacketSerial packetSerial;
 void onPacket(const uint8_t* buffer, size_t size); // defined below
 
+// --- moveTimed feeder (step-separated, per FastAccelStepper issue #363) ---
+// TICKS_PER_S and MIN_CMD_TICKS are provided by FastAccelStepper (pd_config.h).
+static const uint32_t CTRL_TICKS         = TICKS_PER_S / 500; // 2 ms control period
+static const uint32_t MIN_TICKS_PER_STEP = 160;             // ~100 kHz per-step ceiling guard
+static const float    V_FLOOR            = 1.0f;            // steps/s below which we don't rate-time
+int32_t  queued_steps[6]      = {0, 0, 0, 0, 0, 0};        // steps already appended per axis
+uint32_t movetimed_underruns  = 0;                         // diagnostics: queue-empty events
+
 void setup() {
     Serial.begin(921600);
     Serial.setTimeout(2);
@@ -80,7 +88,7 @@ void setup() {
     delay(100);
 
     // initJoints(1, 1, 1, 1, 1, 1, 1);
-    initJoints(1, 0, 0, 0, 0, 0, 1);
+    initJoints(1, 1, 1, 1, 1, 1, 1);
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
@@ -92,19 +100,19 @@ void setup() {
             steppers[i]->setAutoEnable(true);
             // High accel so FAS faithfully follows Ruckig's commanded velocity
             // each cycle -- Ruckig already does the jerk-limited smoothing.
-            steppers[i]->setAcceleration(100000);
+            steppers[i]->setAcceleration(6000);
             steppers[i]->setSpeedInHz(6000);        // safe initial speed
             steppers[i]->applySpeedAcceleration();
             steppers[i]->setCurrentPosition(0);
         }
     }
 
-    // homeAxis(1);
-    // homeAxis(2);
-    // homeAxis(3);
-    // homeAxis(4);
+    homeAxis(1);
+    homeAxis(2);
+    homeAxis(3);
+    homeAxis(4);
     homeAxis(6);
-    // homeAxis(5);
+    homeAxis(5);
     delay(3000); // Wait for homing to complete
 
 
@@ -149,24 +157,40 @@ void onPacket(const uint8_t* buffer, size_t size) {
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
 
-    // Process velocity (rx_packet.v_cmd) and update motors
+    // --- moveTimed feeder (step-separated, per gin66 issue #363) ---
+    // Steps are pinned to the commanded POSITION (drift-free); each command's
+    // DURATION is derived from the commanded VELOCITY, so the step RATE is
+    // constant within the command -- this avoids the fixed-1ms-frame
+    // quantization that produces the harsh 1/2-step-per-frame speed noise.
     for (int i = 0; i < 6; i++) {
-        float cmd_vel = rx_packet.v_cmd[i] * STEPS_PER_DEG[i];
+        int32_t target = lroundf(rx_packet.pos_cmd[i] * STEPS_PER_DEG[i]);
+        int32_t n      = target - queued_steps[i];                        // signed steps to append
+        float   v      = fabsf(rx_packet.vel_cmd[i]) * STEPS_PER_DEG[i];  // steps/s magnitude
 
-        // Convert float Hz to integer milliHz for maximum resolution
-        uint32_t speed_mHz = (uint32_t)(abs(cmd_vel) * 1000.0f);
-
-        if (speed_mHz == 0) {
-            steppers[i]->stopMove();
-        } else {
-            steppers[i]->setSpeedInMilliHz(speed_mHz);
-            steppers[i]->applySpeedAcceleration();
-            if (cmd_vel > 0) steppers[i]->runForward();
-            else             steppers[i]->runBackward();
+        if (n == 0) {
+            // Hold position: keep the queue timed with a one-period pause.
+            steppers[i]->moveTimed(0, CTRL_TICKS, nullptr, true);
+            continue;
         }
+
+        uint32_t abs_n    = (n < 0) ? (uint32_t)(-n) : (uint32_t)n;
+        uint32_t duration = (v > V_FLOOR)
+            ? (uint32_t)(((float)abs_n * (float)TICKS_PER_S) / v)  // step rate == v
+            : CTRL_TICKS;                                          // residual creep at ~0 speed
+        uint32_t min_dur  = abs_n * MIN_TICKS_PER_STEP;            // don't exceed max step rate
+        if (duration < min_dur)       duration = min_dur;
+        if (duration < MIN_CMD_TICKS) duration = MIN_CMD_TICKS;
+
+        uint32_t actual = 0;
+        MoveTimedResultCode r = steppers[i]->moveTimed((int16_t)n, duration, &actual, true);
+        if (r == MOVE_TIMED_OK || r == MOVE_TIMED_EMPTY) {
+            queued_steps[i] += n;                                 // committed to the queue
+            if (r == MOVE_TIMED_EMPTY) movetimed_underruns++;     // queue drained -> sync warning
+        }
+        // MOVE_TIMED_BUSY / errors: not appended -> retry next packet with larger n
     }
 
-    // Read actual hardware positions and reply as [EspToPiPacket | crc16].
+    // Feedback: report the actual (as-executed) position from the step counter.
     for (int i = 0; i < 6; i++) {
         tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
     }

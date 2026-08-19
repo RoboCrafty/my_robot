@@ -16,10 +16,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ruckig)
 
+find_package(Threads REQUIRED)
+
 add_executable(parolController 
                 src/main.cpp
                 src/serialib.cpp)
 
 target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # target_link_libraries(controller PRIVATE PkgConfig::ZeroMQ pinocchio::pinocchio)
-target_link_libraries(parolController ruckig::ruckig)
+target_link_libraries(parolController ruckig::ruckig Threads::Threads)
