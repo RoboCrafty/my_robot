@@ -9,8 +9,8 @@
 #include <BasicLinearAlgebra.h>
 #include <helper_functions.h>
 #include <structs.h>
+#include <PacketSerial.h>
 // #include <motion_planner.h>
-// #include <dds_stepgen.h>   // replaced by FastAccelStepper moveTo() approach
 
 
 #define SERIAL_PORT1 Serial1
@@ -59,11 +59,20 @@ uint8_t prevRampState[6] = {0, 0, 0, 0, 0, 0};
 // trim commanded speed (kept so the structure matches the source 1:1).
 const float axisVelScaleFactor = 1.0f;
 
+// PacketSerial = COBS framing over Serial. It handles delimiting/resync for us;
+// we add a CRC16 inside each payload (PacketSerial does not checksum).
+PacketSerial packetSerial;
+void onPacket(const uint8_t* buffer, size_t size); // defined below
+
 void setup() {
     Serial.begin(921600);
     Serial.setTimeout(2);
     Serial1.begin(115200, SERIAL_8N1, TMC_RX, TMC_TX);
     Serial2.begin(115200, SERIAL_8N1, TMC2_RX, TMC2_TX);
+
+    // Route PacketSerial over the USB UART and register the frame callback.
+    packetSerial.setStream(&Serial);
+    packetSerial.setPacketHandler(&onPacket);
 
     // Initialise
     delay(1000);
@@ -83,7 +92,7 @@ void setup() {
             steppers[i]->setAutoEnable(true);
             // High accel so FAS faithfully follows Ruckig's commanded velocity
             // each cycle -- Ruckig already does the jerk-limited smoothing.
-            steppers[i]->setAcceleration(10000);
+            steppers[i]->setAcceleration(100000);
             steppers[i]->setSpeedInHz(6000);        // safe initial speed
             steppers[i]->applySpeedAcceleration();
             steppers[i]->setCurrentPosition(0);
@@ -128,55 +137,58 @@ void setup() {
 PiToEspPacket rx_packet;
 EspToPiPacket tx_packet;
 
+// Called by PacketSerial once a complete COBS frame has been received and
+// un-stuffed. Framing/resync is handled by the library; we verify the CRC16
+// we appended to the payload, then act and reply.
+void onPacket(const uint8_t* buffer, size_t size) {
+    if (size != sizeof(PiToEspPacket) + 2) return;             // wrong length
+    uint16_t crc = crc16_ccitt(buffer, sizeof(PiToEspPacket));
+    uint16_t rx  = (uint16_t)buffer[sizeof(PiToEspPacket)] |
+                   ((uint16_t)buffer[sizeof(PiToEspPacket) + 1] << 8);
+    if (crc != rx) return;                                     // corrupt -> ignore
+
+    memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
+
+    // Process velocity (rx_packet.v_cmd) and update motors
+    for (int i = 0; i < 6; i++) {
+        float cmd_vel = rx_packet.v_cmd[i] * STEPS_PER_DEG[i];
+
+        // Convert float Hz to integer milliHz for maximum resolution
+        uint32_t speed_mHz = (uint32_t)(abs(cmd_vel) * 1000.0f);
+
+        if (speed_mHz == 0) {
+            steppers[i]->stopMove();
+        } else {
+            steppers[i]->setSpeedInMilliHz(speed_mHz);
+            steppers[i]->applySpeedAcceleration();
+            if (cmd_vel > 0) steppers[i]->runForward();
+            else             steppers[i]->runBackward();
+        }
+    }
+
+    // Read actual hardware positions and reply as [EspToPiPacket | crc16].
+    for (int i = 0; i < 6; i++) {
+        tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
+    }
+    uint8_t payload[sizeof(EspToPiPacket) + 2];
+    memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
+    uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));
+    payload[sizeof(EspToPiPacket)]     = (uint8_t)(tcrc & 0xFF);
+    payload[sizeof(EspToPiPacket) + 1] = (uint8_t)(tcrc >> 8);
+    packetSerial.send(payload, sizeof(payload)); // PacketSerial COBS-frames it
+}
+
 
 void loop() {
-     unsigned long current_time = millis();
-    if (Serial.available() >= sizeof(PiToEspPacket)) {
-        
-        // 2. Read the velocity commands
-        Serial.readBytes((uint8_t*)&rx_packet, sizeof(PiToEspPacket));
-        // 3. Process velocity (rx_packet.v_cmd) and update motors
-        for(int i = 0; i < 6; i++) {
-            float cmd_vel = rx_packet.v_cmd[i] * STEPS_PER_DEG[i];
-            
-            // Convert float Hz to integer milliHz for maximum resolution
-            uint32_t speed_mHz = (uint32_t)(abs(cmd_vel) * 1000.0f); 
-            
-            if (speed_mHz == 0) {
-                // Stop immediately if the Pi commands 0 velocity
-                steppers[i]->stopMove(); 
-            } else {
-                steppers[i]->setSpeedInMilliHz(speed_mHz);
-                
-                // Apply the speed change instantly while the motor is running
-                steppers[i]->applySpeedAcceleration(); 
-                
-                // Command direction based on the sign of the velocity
-                if (cmd_vel > 0) {
-                    steppers[i]->runForward();
-                } else {
-                    steppers[i]->runBackward();
-                }
-            }
-        }
-        
-        
-       
+    unsigned long current_time = millis();
 
-        // 4. Read actual hardware positions into tx_packet
-        for(int i=0; i<6; i++) {
-            tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
-        }
-        
-        // 5. Send positions back to Pi immediately
-        Serial.write((uint8_t*)&tx_packet, sizeof(EspToPiPacket));
-    }
+    // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
+    packetSerial.update();
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
-        
-    }
 
+    }
 }
 
 void moveJoint()

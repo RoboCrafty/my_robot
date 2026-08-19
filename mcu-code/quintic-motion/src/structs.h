@@ -1,5 +1,7 @@
 #pragma once
 
+#include "protocol.h"   // EspToPiPacket / PiToEspPacket + framing helpers
+
 struct Joints {
     float q1, q2, q3, q4, q5, q6;
 };
@@ -14,16 +16,6 @@ struct TrigValues {
     float s1, s2, s3, s4, s5, s6;
     float c1, c2, c3, c4, c5, c6;
 };
-
-#pragma pack(push, 1) // Force exact byte alignment
-struct EspToPiPacket {
-    float actual_position[6]; // 24 bytes
-};
-
-struct PiToEspPacket {
-    float   v_cmd[6];           // Velocity feedforward in steps/sec (24 bytes)
-};
-#pragma pack(pop)
 
 // Toggle this: 1 to enable debug prints, 0 to disable completely
 #define DEBUG_MODE 0
