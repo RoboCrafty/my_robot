@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
 
     // Loop-rate diagnostic: measures the ACTUAL loop cadence vs the target 500 Hz.
     struct timespec t_prev = next_tick, t_now;
-    long   rate_count = 0, rate_over = 0;
+    long   rate_count = 0, rate_over = 0, rx_ok = 0;
     double rate_sum_us = 0, rate_max_us = 0, rate_win_us = 0;
 
     while (g_running.load()) {
@@ -277,10 +277,10 @@ int main(int argc, char** argv) {
         if (dt_us > 2500.0) rate_over++;                       // missed the 2 ms budget
         if (rate_win_us >= 1e6) {                              // report ~once per second
             std::fprintf(stderr,
-                "[loop] %.0f Hz  mean %.2f ms  max %.2f ms  overruns %ld/%ld\n",
+                "[loop] %.0f Hz  mean %.2f ms  max %.2f ms  overruns %ld/%ld  rx-replies %ld/s\n",
                 rate_count / (rate_win_us / 1e6), rate_sum_us / rate_count / 1000.0,
-                rate_max_us / 1000.0, rate_over, rate_count);
-            rate_count = 0; rate_sum_us = 0; rate_max_us = 0; rate_over = 0; rate_win_us = 0;
+                rate_max_us / 1000.0, rate_over, rate_count, rx_ok);
+            rate_count = 0; rate_sum_us = 0; rate_max_us = 0; rate_over = 0; rate_win_us = 0; rx_ok = 0;
         }
 
         // Apply any freshly entered target(s)/limits/stop from the REPL thread.
@@ -327,7 +327,7 @@ int main(int argc, char** argv) {
         serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
 
         // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
-        readFramedPacket(serial, rx_reader, rx_packet, 1);  // on drop, keep last good rx_packet
+        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) rx_ok++;  // count valid round-trips/s
 
         // 4. Optional live telemetry -- throttled to ~5 Hz on a single line so it
         //    doesn't flood the REPL. Toggle with the 'mon' command (off by default).
