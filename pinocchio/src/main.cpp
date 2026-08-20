@@ -61,6 +61,7 @@ static std::array<double, DOFs> g_target;          // last commanded targets (de
 static bool                     g_have_new = false; // guarded by g_mtx
 static std::atomic<bool>        g_running{true};
 static std::atomic<bool>        g_monitor{false};   // live one-line telemetry on/off
+static std::atomic<bool>        g_stats{false};     // loop/serial counters on/off
 
 // Per-joint motion limits (deg/s, deg/s^2, deg/s^3). Editable live via the
 // vel/acc/jerk commands (guarded by g_mtx once the REPL runs). J2 is the
@@ -90,6 +91,7 @@ static const char* HELP_TEXT =
     "  jerk <j|all> <v>    set max jerk (deg/s^3)\n"
     "  limits              show current motion limits\n"
     "  mon                 toggle live position monitor\n"
+    "  stats               toggle loop and serial statistics\n"
     "  help                show this help\n"
     "  q / quit            exit\n";
 
@@ -105,6 +107,7 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "q" || tok[0] == "quit" || tok[0] == "exit") { g_running = false; return "bye"; }
     if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
+    if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
 
     if (tok[0] == "limits") {
@@ -261,26 +264,24 @@ int main(int argc, char** argv) {
     struct timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
 
-    // Loop-rate diagnostic: measures the ACTUAL loop cadence vs the target 500 Hz.
+    // Per-second counters for the optional concise `stats` output.
     struct timespec t_prev = next_tick, t_now;
-    long   rate_count = 0, rate_over = 0, rx_ok = 0;
-    double rate_sum_us = 0, rate_max_us = 0, rate_win_us = 0;
+    long   loop_count = 0, tx_count = 0, rx_count = 0;
+    double stats_window_us = 0;
 
     while (g_running.load()) {
 
-        // Measure the real wall-clock time since the previous iteration.
+        // Measure elapsed time to calculate the loop rate once per second.
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         double dt_us = (t_now.tv_sec - t_prev.tv_sec) * 1e6 + (t_now.tv_nsec - t_prev.tv_nsec) / 1e3;
         t_prev = t_now;
-        rate_count++; rate_sum_us += dt_us; rate_win_us += dt_us;
-        if (dt_us > rate_max_us) rate_max_us = dt_us;
-        if (dt_us > 2500.0) rate_over++;                       // missed the 2 ms budget
-        if (rate_win_us >= 1e6) {                              // report ~once per second
-            std::fprintf(stderr,
-                "[loop] %.0f Hz  mean %.2f ms  max %.2f ms  overruns %ld/%ld  rx-replies %ld/s\n",
-                rate_count / (rate_win_us / 1e6), rate_sum_us / rate_count / 1000.0,
-                rate_max_us / 1000.0, rate_over, rate_count, rx_ok);
-            rate_count = 0; rate_sum_us = 0; rate_max_us = 0; rate_over = 0; rate_win_us = 0; rx_ok = 0;
+        loop_count++; stats_window_us += dt_us;
+        if (stats_window_us >= 1e6) {
+            if (g_stats.load()) {
+                std::fprintf(stderr, "[stats] loop %.0f Hz  serial writes %ld/s  ESP replies %ld/s\n",
+                    loop_count / (stats_window_us / 1e6), tx_count, rx_count);
+            }
+            loop_count = 0; tx_count = 0; rx_count = 0; stats_window_us = 0;
         }
 
         // Apply any freshly entered target(s)/limits/stop from the REPL thread.
@@ -325,9 +326,10 @@ int main(int argc, char** argv) {
 
         // 2. Send Velocity Command (COBS-framed + CRC16)
         serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
+        tx_count++;
 
         // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
-        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) rx_ok++;  // count valid round-trips/s
+        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) rx_count++;
 
         // 4. Optional live telemetry -- throttled to ~5 Hz on a single line so it
         //    doesn't flood the REPL. Toggle with the 'mon' command (off by default).
