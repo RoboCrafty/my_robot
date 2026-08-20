@@ -13,6 +13,13 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <cstdlib>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <cstdio>
 
 #include "protocol.h"   // EspToPiPacket / PiToEspPacket + COBS/CRC framing
 
@@ -64,99 +71,139 @@ static double g_max_jerk[DOFs] = {1500, 800, 1000, 3000, 3000, 3000};
 static bool   g_have_new_limits = false;  // guarded by g_mtx
 static bool   g_stop_request    = false;  // guarded by g_mtx
 
-static void printHelp() {
-    std::cout <<
-        "\nCommands:\n"
-        "  a1 a2 a3 a4 a5 a6   set all six joint targets (deg)\n"
-        "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
-        "  home                all joints to 0\n"
-        "  stop                decelerate to a stop and hold\n"
-        "  vel  <j|all> <v>    set max velocity (deg/s)\n"
-        "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
-        "  jerk <j|all> <v>    set max jerk (deg/s^3)\n"
-        "  limits              show current motion limits\n"
-        "  mon                 toggle live position monitor\n"
-        "  help                show this help\n"
-        "  q / quit            exit\n";
+// UDP command/telemetry socket (localhost). Commands in = the same text grammar
+// as the REPL; state out = a compact JSON line for the Python web UI.
+static int         g_udp_fd = -1;
+static std::mutex  g_addr_mtx;
+static sockaddr_in g_client{};
+static bool        g_have_client = false;
+
+static const char* HELP_TEXT =
+    "\nCommands:\n"
+    "  a1 a2 a3 a4 a5 a6   set all six joint targets (deg)\n"
+    "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
+    "  jog <j> <delta>     move one joint by a relative amount (deg)\n"
+    "  home                all joints to 0\n"
+    "  stop                decelerate to a stop and hold\n"
+    "  vel  <j|all> <v>    set max velocity (deg/s)\n"
+    "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
+    "  jerk <j|all> <v>    set max jerk (deg/s^3)\n"
+    "  limits              show current motion limits\n"
+    "  mon                 toggle live position monitor\n"
+    "  help                show this help\n"
+    "  q / quit            exit\n";
+
+// Parse and apply one command line. Returns a short status string. Shared by the
+// stdin REPL and the UDP interface; thread-safe via g_mtx.
+static std::string handleCommand(const std::string& line) {
+    std::istringstream iss(line);
+    std::vector<std::string> tok; std::string t;
+    while (iss >> t) tok.push_back(t);
+    if (tok.empty()) return "";
+
+    if (tok[0] == "ping") return "";                                   // just registers the client
+    if (tok[0] == "q" || tok[0] == "quit" || tok[0] == "exit") { g_running = false; return "bye"; }
+    if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
+    if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
+    if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
+
+    if (tok[0] == "limits") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        std::ostringstream os; os << "        vel      acc      jerk\n";
+        for (int i = 0; i < DOFs; i++)
+            os << "  J" << (i + 1) << ":  " << g_max_vel[i] << "     "
+               << g_max_acc[i] << "     " << g_max_jerk[i] << "\n";
+        return os.str();
+    }
+
+    if (tok[0] == "vel" || tok[0] == "acc" || tok[0] == "jerk") {
+        if (tok.size() != 3) return "usage: " + tok[0] + " <j|all> <value>";
+        double* arr = (tok[0] == "vel") ? g_max_vel : (tok[0] == "acc") ? g_max_acc : g_max_jerk;
+        try {
+            double val = std::stod(tok[2]);
+            if (val <= 0.0) return "value must be > 0";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (tok[1] == "all") { for (int i = 0; i < DOFs; i++) arr[i] = val; }
+            else {
+                int j = std::stoi(tok[1]);
+                if (j < 1 || j > DOFs) return "joint must be 1..6";
+                arr[j - 1] = val;
+            }
+            g_have_new_limits = true;
+            return tok[0] + " updated";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "jog") {
+        if (tok.size() != 3) return "usage: jog <j> <delta>";
+        try {
+            int j = std::stoi(tok[1]); double d = std::stod(tok[2]);
+            if (j < 1 || j > DOFs) return "joint must be 1..6";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_target[j - 1] += d; g_have_new = true;
+            return "jog ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    try {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (tok[0] == "home") {
+            g_target.fill(0.0);
+        } else if ((int)tok.size() == DOFs) {              // six numbers -> all joints
+            for (int i = 0; i < DOFs; i++) g_target[i] = std::stod(tok[i]);
+        } else if (tok.size() == 2) {                      // "<joint> <angle>"
+            int j = std::stoi(tok[0]);
+            if (j < 1 || j > DOFs) return "joint must be 1..6";
+            g_target[j - 1] = std::stod(tok[1]);
+        } else {
+            return "unrecognised command -- type 'help'";
+        }
+        g_have_new = true;
+        return "target updated";
+    } catch (const std::exception&) { return "could not parse numbers"; }
 }
 
-// Background REPL: reads command lines and updates the shared targets. Runs on
-// its own thread so the 500 Hz streaming loop is never blocked by user input.
+// Background stdin REPL.
 static void inputThread() {
-    printHelp();
+    std::cout << HELP_TEXT;
     std::string line;
     while (g_running.load()) {
         std::cout << "\n> " << std::flush;
         if (!std::getline(std::cin, line)) { g_running = false; break; }  // Ctrl-D
-
-        std::istringstream iss(line);
-        std::vector<std::string> tok; std::string t;
-        while (iss >> t) tok.push_back(t);
-        if (tok.empty()) continue;
-
-        if (tok[0] == "q" || tok[0] == "quit" || tok[0] == "exit") { g_running = false; break; }
-        if (tok[0] == "help" || tok[0] == "h") { printHelp(); continue; }
-        if (tok[0] == "mon") {
-            g_monitor = !g_monitor.load();
-            std::cout << "monitor " << (g_monitor ? "ON" : "OFF") << "\n";
-            continue;
-        }
-        if (tok[0] == "stop") {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            g_stop_request = true;
-            std::cout << "stopping\n";
-            continue;
-        }
-        if (tok[0] == "limits") {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            std::cout << "        vel      acc      jerk\n";
-            for (int i = 0; i < DOFs; i++)
-                std::cout << "  J" << (i + 1) << ":  " << g_max_vel[i]
-                          << "     " << g_max_acc[i] << "     " << g_max_jerk[i] << "\n";
-            continue;
-        }
-        if (tok[0] == "vel" || tok[0] == "acc" || tok[0] == "jerk") {
-            if (tok.size() != 3) { std::cout << "usage: " << tok[0] << " <j|all> <value>\n"; continue; }
-            double* arr = (tok[0] == "vel") ? g_max_vel : (tok[0] == "acc") ? g_max_acc : g_max_jerk;
-            try {
-                double val = std::stod(tok[2]);
-                if (val <= 0.0) { std::cout << "value must be > 0\n"; continue; }
-                std::lock_guard<std::mutex> lk(g_mtx);
-                if (tok[1] == "all") {
-                    for (int i = 0; i < DOFs; i++) arr[i] = val;
-                } else {
-                    int j = std::stoi(tok[1]);
-                    if (j < 1 || j > DOFs) { std::cout << "joint must be 1.." << DOFs << "\n"; continue; }
-                    arr[j - 1] = val;
-                }
-                g_have_new_limits = true;
-                std::cout << tok[0] << " updated\n";
-            } catch (const std::exception&) {
-                std::cout << "could not parse -- usage: " << tok[0] << " <j|all> <value>\n";
-            }
-            continue;
-        }
-
-        try {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            if (tok[0] == "home") {
-                g_target.fill(0.0);
-            } else if ((int)tok.size() == DOFs) {         // six numbers -> all joints
-                for (int i = 0; i < DOFs; i++) g_target[i] = std::stod(tok[i]);
-            } else if (tok.size() == 2) {                 // "<joint> <angle>"
-                int j = std::stoi(tok[0]);
-                if (j < 1 || j > DOFs) { std::cout << "joint must be 1.." << DOFs << "\n"; continue; }
-                g_target[j - 1] = std::stod(tok[1]);
-            } else {
-                std::cout << "unrecognised command -- type 'help'\n";
-                continue;
-            }
-            g_have_new = true;
-            std::cout << "target updated\n";
-        } catch (const std::exception&) {
-            std::cout << "could not parse numbers -- type 'help'\n";
-        }
+        std::string r = handleCommand(line);
+        if (!r.empty()) std::cout << r << "\n";
     }
+}
+
+// Background UDP command listener (localhost). Records the client address so the
+// 500 Hz loop can publish state back to it. Uses a recv timeout for clean exit.
+static void udpThread(int udp_port) {
+    g_udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_udp_fd < 0) { std::cerr << "UDP: socket() failed\n"; return; }
+
+    struct timeval tv{0, 200000}; // 200 ms recv timeout
+    setsockopt(g_udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)udp_port);
+    if (bind(g_udp_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "UDP: bind() failed on port " << udp_port << "\n";
+        close(g_udp_fd); g_udp_fd = -1; return;
+    }
+    std::cout << "UDP command interface on 127.0.0.1:" << udp_port << "\n";
+
+    char buf[1024];
+    while (g_running.load()) {
+        sockaddr_in cli{}; socklen_t clilen = sizeof(cli);
+        ssize_t n = recvfrom(g_udp_fd, buf, sizeof(buf) - 1, 0, (sockaddr*)&cli, &clilen);
+        if (n <= 0) continue;                                // timeout or error -> re-check g_running
+        buf[n] = '\0';
+        { std::lock_guard<std::mutex> lk(g_addr_mtx); g_client = cli; g_have_client = true; }
+        handleCommand(std::string(buf, (size_t)n));
+    }
+    close(g_udp_fd); g_udp_fd = -1;
 }
 
 int main(int argc, char** argv) {
@@ -201,18 +248,40 @@ int main(int argc, char** argv) {
         input.max_jerk[i]         = g_max_jerk[i];
     }
 
-    // Seed the shared targets with the current position, then start the REPL.
+    // Seed the shared targets with the current position, then start REPL + UDP.
     for (int i = 0; i < DOFs; i++) g_target[i] = input.target_position[i];
+    int udp_port = (argc > 2) ? std::atoi(argv[2]) : 5005;
     std::thread repl(inputThread);
+    std::thread udp(udpThread, udp_port);
 
-    std::cout << "\nStreaming at 500 Hz. Enter commands below.\n";
+    std::cout << "\nStreaming at 500 Hz. Enter commands below (or use the web UI).\n";
 
     serial.flushReceiver();
 
     struct timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
 
+    // Loop-rate diagnostic: measures the ACTUAL loop cadence vs the target 500 Hz.
+    struct timespec t_prev = next_tick, t_now;
+    long   rate_count = 0, rate_over = 0;
+    double rate_sum_us = 0, rate_max_us = 0, rate_win_us = 0;
+
     while (g_running.load()) {
+
+        // Measure the real wall-clock time since the previous iteration.
+        clock_gettime(CLOCK_MONOTONIC, &t_now);
+        double dt_us = (t_now.tv_sec - t_prev.tv_sec) * 1e6 + (t_now.tv_nsec - t_prev.tv_nsec) / 1e3;
+        t_prev = t_now;
+        rate_count++; rate_sum_us += dt_us; rate_win_us += dt_us;
+        if (dt_us > rate_max_us) rate_max_us = dt_us;
+        if (dt_us > 2500.0) rate_over++;                       // missed the 2 ms budget
+        if (rate_win_us >= 1e6) {                              // report ~once per second
+            std::fprintf(stderr,
+                "[loop] %.0f Hz  mean %.2f ms  max %.2f ms  overruns %ld/%ld\n",
+                rate_count / (rate_win_us / 1e6), rate_sum_us / rate_count / 1000.0,
+                rate_max_us / 1000.0, rate_over, rate_count);
+            rate_count = 0; rate_sum_us = 0; rate_max_us = 0; rate_over = 0; rate_win_us = 0;
+        }
 
         // Apply any freshly entered target(s)/limits/stop from the REPL thread.
         {
@@ -274,6 +343,32 @@ int main(int argc, char** argv) {
                       << "     " << std::flush;
         }
 
+        // Publish state to the web UI over UDP at ~30 Hz.
+        static int pub = 0;
+        if (g_udp_fd >= 0 && (++pub % 16 == 0)) {
+            bool have; sockaddr_in cli;
+            { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
+            if (have) {
+                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs];
+                { std::lock_guard<std::mutex> lk(g_mtx);
+                  for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; } }
+                char sb[640];
+                int len = snprintf(sb, sizeof(sb),
+                    "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                    "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                    "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+                    "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+                    "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}",
+                    rx_packet.actual_position[0], rx_packet.actual_position[1], rx_packet.actual_position[2],
+                    rx_packet.actual_position[3], rx_packet.actual_position[4], rx_packet.actual_position[5],
+                    tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
+                    vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
+                    am[0],am[1],am[2],am[3],am[4],am[5],
+                    jm[0],jm[1],jm[2],jm[3],jm[4],jm[5]);
+                if (len > 0) sendto(g_udp_fd, sb, (size_t)len, 0, (sockaddr*)&cli, sizeof(cli));
+            }
+        }
+
         // 5. Sleep exactly until the next 2ms interval (500 Hz)
         next_tick.tv_nsec += 2000000; // Add 2ms
         if (next_tick.tv_nsec >= 1000000000) {
@@ -284,7 +379,8 @@ int main(int argc, char** argv) {
     }
 
     g_running = false;
-    if (repl.joinable()) repl.join();
+    if (udp.joinable())  udp.join();     // exits within the recv timeout
+    if (repl.joinable()) repl.detach();  // stdin getline can't be unblocked; let it go
     serial.closeDevice();
     return 0;
 }
