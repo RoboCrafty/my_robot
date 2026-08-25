@@ -71,6 +71,10 @@ static double g_max_acc[DOFs]  = {600, 600,  600,  1200,  1200, 1200};
 static double g_max_jerk[DOFs] = {1500, 800, 1000, 3000, 3000, 3000};
 static bool   g_have_new_limits = false;  // guarded by g_mtx
 static bool   g_stop_request    = false;  // guarded by g_mtx
+static uint8_t g_motor_enable_mask = 0x3f; // bits 0..5: J1..J6, guarded by g_mtx
+static bool   g_rehome_request = false;    // guarded by g_mtx
+static bool   g_rehome_hold = false;       // owned by the control loop
+static uint8_t g_rehome_completion = 0;    // owned by the control loop
 
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
 // as the REPL; state out = a compact JSON line for the Python web UI.
@@ -85,7 +89,9 @@ static const char* HELP_TEXT =
     "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
     "  jog <j> <delta>     move one joint by a relative amount (deg)\n"
     "  home                all joints to 0\n"
+    "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
+    "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
     "  jerk <j|all> <v>    set max jerk (deg/s^3)\n"
@@ -109,6 +115,31 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
+    if (tok[0] == "rehome") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_motor_enable_mask = 0x3f;
+        g_target.fill(0.0);
+        g_have_new = true;
+        g_rehome_request = true;
+        return "rehoming";
+    }
+
+    if (tok[0] == "motor") {
+        if (tok.size() != 3 || (tok[2] != "on" && tok[2] != "off")) return "usage: motor <j|all> <on|off>";
+        std::lock_guard<std::mutex> lk(g_mtx);
+        uint8_t bits = 0;
+        if (tok[1] == "all") bits = 0x3f;
+        else {
+            try {
+                int j = std::stoi(tok[1]);
+                if (j < 1 || j > DOFs) return "joint must be 1..6";
+                bits = (uint8_t)(1u << (j - 1));
+            } catch (const std::exception&) { return "joint must be 1..6"; }
+        }
+        if (tok[2] == "on") g_motor_enable_mask |= bits;
+        else g_motor_enable_mask &= (uint8_t)~bits;
+        return "motor torque updated";
+    }
 
     if (tok[0] == "limits") {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -227,6 +258,7 @@ int main(int argc, char** argv) {
     EspToPiPacket rx_packet = {0};
     FrameReader<EspToPiPacket> rx_reader;
     uint8_t txbuf[frameMaxLen<PiToEspPacket>()];
+    tx_packet.motor_enable_mask = 0x3f;
 
     // 1. Synchronize Initial Position
     // The ESP32 only replies when we send something. Send a dummy zero-velocity packet.
@@ -307,6 +339,18 @@ int main(int argc, char** argv) {
                 }
                 g_stop_request = false;
             }
+            if (g_rehome_request) {
+                for (int i = 0; i < DOFs; i++) {
+                    input.current_position[i] = 0.0;
+                    input.current_velocity[i] = 0.0;
+                    input.current_acceleration[i] = 0.0;
+                    input.target_position[i] = 0.0;
+                    input.target_velocity[i] = 0.0;
+                    input.target_acceleration[i] = 0.0;
+                }
+                g_rehome_hold = true;
+                g_rehome_completion = (uint8_t)(rx_packet.homing_sequence + 1);
+            }
         }
 
         auto res = ruck.update(input, output);
@@ -319,9 +363,12 @@ int main(int argc, char** argv) {
         // --- STREAM POSITION + VELOCITY for the ESP moveTimed feeder ---
         // Position pins the step count (drift-free); velocity sets the step rate.
         for(int i = 0; i < DOFs; i++) {
-            tx_packet.pos_cmd[i] = output.new_position[i];
-            tx_packet.vel_cmd[i] = output.new_velocity[i];
+                        tx_packet.pos_cmd[i] = g_rehome_hold ? 0.0f : output.new_position[i];
+                        tx_packet.vel_cmd[i] = g_rehome_hold ? 0.0f : output.new_velocity[i];
         }
+                { std::lock_guard<std::mutex> lk(g_mtx);
+                    tx_packet.motor_enable_mask = g_motor_enable_mask | (g_rehome_request ? 0x40 : 0);
+                    g_rehome_request = false; }
         output.pass_to_input(input);
 
         // 2. Send Velocity Command (COBS-framed + CRC16)
@@ -329,7 +376,13 @@ int main(int argc, char** argv) {
         tx_count++;
 
         // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
-        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) rx_count++;
+        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) {
+            rx_count++;
+            if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
+                g_rehome_hold = false;
+                std::cout << "Rehome complete\n";
+            }
+        }
 
         // 4. Optional live telemetry -- throttled to ~5 Hz on a single line so it
         //    doesn't flood the REPL. Toggle with the 'mon' command (off by default).
@@ -351,22 +404,27 @@ int main(int argc, char** argv) {
             bool have; sockaddr_in cli;
             { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
             if (have) {
-                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs];
+                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask;
                 { std::lock_guard<std::mutex> lk(g_mtx);
-                  for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; } }
+                                    for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; }
+                                    enabled_mask = g_motor_enable_mask; }
                 char sb[640];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                    "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}",
+                    "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+                    "\"enabled\":[%d,%d,%d,%d,%d,%d]}",
                     rx_packet.actual_position[0], rx_packet.actual_position[1], rx_packet.actual_position[2],
                     rx_packet.actual_position[3], rx_packet.actual_position[4], rx_packet.actual_position[5],
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],
-                    jm[0],jm[1],jm[2],jm[3],jm[4],jm[5]);
+                    jm[0],jm[1],jm[2],jm[3],jm[4],jm[5],
+                    (enabled_mask & 0x01) != 0, (enabled_mask & 0x02) != 0,
+                    (enabled_mask & 0x04) != 0, (enabled_mask & 0x08) != 0,
+                    (enabled_mask & 0x10) != 0, (enabled_mask & 0x20) != 0);
                 if (len > 0) sendto(g_udp_fd, sb, (size_t)len, 0, (sockaddr*)&cli, sizeof(cli));
             }
         }

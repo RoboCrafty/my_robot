@@ -28,6 +28,8 @@
   input[type=number], input[type=text] { background:#0f131a; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; width:70px; }
   .num { width:64px; text-align:right; font-variant-numeric:tabular-nums; }
   .act { width:64px; text-align:right; color:var(--good); font-variant-numeric:tabular-nums; }
+  .motor { width:56px; }
+  .motor.off { color:var(--mut); }
   .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
   .inc { display:flex; gap:6px; align-items:center; }
   .inc .btn.on { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -45,6 +47,7 @@
   <h1>Parol6 Control</h1>
   <button class="btn" onclick="sync()">Sync&nbsp;↺</button>
   <button class="btn" onclick="cmd('home')">Home</button>
+  <button class="btn bad" onclick="rehome()">Rehome</button>
   <button class="btn bad" onclick="cmd('stop')">STOP</button>
   <span id="status">connecting…</span>
 </header>
@@ -60,6 +63,11 @@
       <button class="btn sm" onclick="addIncrement()">＋ preset</button>
     </div>
     <div id="joints"></div>
+  </section>
+
+  <section class="panel span2">
+    <h2>Motor torque</h2>
+    <div class="toolbar" id="motorBar"></div>
   </section>
 
   <!-- Poses -->
@@ -105,7 +113,7 @@
 
 <script>
 const NJ = 6, JMIN = -180, JMAX = 180;
-let state = { pos:Array(NJ).fill(0), tgt:Array(NJ).fill(0), vmax:Array(NJ).fill(0), amax:Array(NJ).fill(0), jmax:Array(NJ).fill(0) };
+let state = { pos:Array(NJ).fill(0), tgt:Array(NJ).fill(0), vmax:Array(NJ).fill(0), amax:Array(NJ).fill(0), jmax:Array(NJ).fill(0), enabled:Array(NJ).fill(1) };
 let config = { poses:{}, sequences:{}, increments:[5,10,20] };
 let selInc = 10;
 let curSteps = [];                 // working sequence: [{pose, dwell}]
@@ -124,7 +132,13 @@ function connect() {
     if (m.type === "play_done") setStatus("connected · play done", "ok");
   };
 }
-function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function send(o) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(o));
+  } else {
+    setStatus("controller connection unavailable", "err");
+  }
+}
 function cmd(line) { send({ type:"cmd", line }); }
 function setStatus(t, c) { const s = document.getElementById("status"); s.textContent = t; s.className = c || ""; }
 
@@ -148,7 +162,11 @@ function buildJoints() {
   }
 }
 function onState(m) {
-  state = m;
+  state = {
+    ...state,
+    ...m,
+    enabled: Array.isArray(m.enabled) ? m.enabled : state.enabled,
+  };
   for (let j = 0; j < NJ; j++) {
     document.getElementById(`ac${j}`).textContent = (+m.pos[j]).toFixed(1);
     if (Date.now() - sliderBusy[j] > 700) {          // don't fight the user while dragging
@@ -160,11 +178,27 @@ function onState(m) {
   for (let j = 0; j < NJ; j++) {
     setIfIdle(`v${j}`, m.vmax[j]); setIfIdle(`a${j}`, m.amax[j]); setIfIdle(`k${j}`, m.jmax[j]);
   }
+  renderMotors();
 }
 function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
 function setJoint(j, val) { cmd(`${j+1} ${(+val).toFixed(3)}`); }
 function jog(j, dir) { cmd(`jog ${j+1} ${dir*selInc}`); sliderBusy[j] = Date.now(); }
 function sync() { cmd(state.pos.map(x => (+x).toFixed(3)).join(" ")); }  // set targets = actual
+function rehome() {
+  if (confirm("Rehome all joints using the limit switches?")) cmd("rehome");
+}
+
+function renderMotors() {
+  const bar = document.getElementById("motorBar"); bar.innerHTML = "";
+  for (let j = 0; j < NJ; j++) {
+    const enabled = !!state.enabled[j];
+    const b = document.createElement("button");
+    b.className = "btn motor" + (enabled ? " accent" : " off");
+    b.textContent = `J${j+1} ${enabled ? "On" : "Off"}`;
+    b.onclick = () => cmd(`motor ${j+1} ${enabled ? "off" : "on"}`);
+    bar.appendChild(b);
+  }
+}
 
 // ---- Increments ----
 function renderIncrements() {
@@ -280,6 +314,7 @@ function renderConfig() { renderIncrements(); renderPoses(); renderSeqs(); }
 // ---- init ----
 buildJoints();
 buildLimits();
+renderMotors();
 renderIncrements();
 connect();
 </script>

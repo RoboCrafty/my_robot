@@ -7,11 +7,13 @@
 #pragma pack(push, 1) // exact byte alignment across both platforms
 struct EspToPiPacket {
     float actual_position[6]; // 24 bytes
+    uint8_t homing_sequence;  // Increments after each completed rehome
 };
 
 struct PiToEspPacket {
     float pos_cmd[6];         // Absolute target position, deg (24 bytes)
     float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
+    uint8_t motor_enable_mask;// Bits 0..5: J1..J6 enabled; bit 6: rehome request
 };
 #pragma pack(pop)
 

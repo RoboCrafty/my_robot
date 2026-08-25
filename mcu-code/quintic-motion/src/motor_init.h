@@ -119,3 +119,5 @@ namespace Constants {
 
     // ================= FUNCTIONS =================
     void initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool start_J4, bool start_J5, bool start_J6);
+    void turnDriverOff(uint motorNo);
+    void turnDriverOn(uint motorNo);
