@@ -196,7 +196,10 @@ void onPacket(const uint8_t* buffer, size_t size) {
         }
 
         int32_t target = lroundf(rx_packet.pos_cmd[i] * STEPS_PER_DEG[i]);
-        int32_t n      = target - queued_steps[i];                        
+        int32_t n      = target - queued_steps[i];                  
+        // FIX: Clamp `n` to int16_t bounds so the physical motor and planner never desync
+        if (n > 32767) n = 32767;
+        if (n < -32768) n = -32768;      
         float   v      = fabsf(rx_packet.vel_cmd[i]) * STEPS_PER_DEG[i];  
 
         if (n == 0) {
@@ -222,6 +225,16 @@ void onPacket(const uint8_t* buffer, size_t size) {
         // Apply our accumulated error to the requested duration
         int32_t requested_duration = (int32_t)ideal_duration - tick_error[i];
 
+        // A very slow (time-synchronized) axis would otherwise stretch one step
+        // across many control periods, keeping FAS BUSY so queued_steps lags the
+        // target; the backlog then flushes in one burst at end-of-move (the J4
+        // jump + lost steps). Cap the command so the axis frees up each cycle.
+        bool capped = false;
+        if (requested_duration > (int32_t)(2 * CTRL_TICKS)) {
+            requested_duration = (int32_t)(2 * CTRL_TICKS);
+            capped = true;
+        }
+
         // Clamp to safe limits based on the library's requirements
         uint32_t min_dur = abs_n * MIN_TICKS_PER_STEP;
         if (requested_duration < (int32_t)min_dur) requested_duration = min_dur;
@@ -234,9 +247,12 @@ void onPacket(const uint8_t* buffer, size_t size) {
             queued_steps[i] += n;                                 
             if (r == MOVE_TIMED_EMPTY) movetimed_underruns++;     
 
-            // Accumulate the error: What the hardware actually took vs what Ruckig wanted
-            if (v > V_FLOOR) {
+            // Accumulate timer-quantization error only while tracking the ideal
+            // timeline; when capped the timeline is intentionally abandoned.
+            if (v > V_FLOOR && !capped) {
                 tick_error[i] += ((int32_t)actual_duration - (int32_t)ideal_duration);
+            } else {
+                tick_error[i] = 0;
             }
         }
     }
