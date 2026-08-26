@@ -88,8 +88,8 @@ void setup() {
     // // Serial.println("\n--- Initializing System ---");
     // delay(100);
 
-    // initJoints(1, 1, 1, 1, 1, 1, 1);
     initJoints(1, 1, 1, 1, 1, 1, 1);
+    // initJoints(1, 0, 0, 0, 0, 0, 0);
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
@@ -175,6 +175,15 @@ void onPacket(const uint8_t* buffer, size_t size) {
         tx_packet.homing_sequence++;
     }
 
+    // Sync (0x80): re-reference the queue to the executed position so the host
+    // can adopt motor feedback as its planner state without commanding motion.
+    if (rx_packet.motor_enable_mask & 0x80) {
+        for (int i = 0; i < 6; i++) {
+            queued_steps[i] = steppers[i]->getCurrentPosition();
+            tick_error[i] = 0;
+        }
+    }
+
     // --- moveTimed feeder (step-separated, per gin66 issue #363) ---
     // Steps are pinned to the commanded POSITION (drift-free); each command's
     // DURATION is derived from the commanded VELOCITY, so the step RATE is
@@ -253,11 +262,31 @@ void loop() {
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
-
+        // printLimitSwitchStates();
     }
+        
 }
 
 void moveJoint()
 {
 
+}
+
+void printLimitSwitchStates()
+{
+    Serial.printf(
+            "Limits raw: J1=%d J2=%d J3=%d J4=%d J5=%d J6=%d | triggered: J1=%d J2=%d J3=%d J4=%d J5=%d J6=%d\n",
+            digitalRead(Constants::Pins::L1_PIN),
+            digitalRead(Constants::Pins::L2_PIN),
+            digitalRead(Constants::Pins::L3_PIN),
+            digitalRead(Constants::Pins::L4_PIN),
+            digitalRead(Constants::Pins::L5_PIN),
+            digitalRead(Constants::Pins::L6_PIN),
+            isLimitSwitchTriggered(1),
+            isLimitSwitchTriggered(2),
+            isLimitSwitchTriggered(3),
+            isLimitSwitchTriggered(4),
+            isLimitSwitchTriggered(5),
+            isLimitSwitchTriggered(6));
+    
 }

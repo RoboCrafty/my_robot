@@ -183,7 +183,7 @@ function onState(m) {
 function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
 function setJoint(j, val) { cmd(`${j+1} ${(+val).toFixed(3)}`); }
 function jog(j, dir) { cmd(`jog ${j+1} ${dir*selInc}`); sliderBusy[j] = Date.now(); }
-function sync() { cmd(state.pos.map(x => (+x).toFixed(3)).join(" ")); }  // set targets = actual
+function sync() { cmd('sync'); }
 function rehome() {
   if (confirm("Rehome all joints using the limit switches?")) cmd("rehome");
 }

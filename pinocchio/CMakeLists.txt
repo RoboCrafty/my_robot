@@ -24,4 +24,4 @@ add_executable(parolController
 
 target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # target_link_libraries(controller PRIVATE PkgConfig::ZeroMQ pinocchio::pinocchio)
-target_link_libraries(parolController ruckig::ruckig Threads::Threads)
+target_link_libraries(parolController ruckig::ruckig Threads::Threads readline)

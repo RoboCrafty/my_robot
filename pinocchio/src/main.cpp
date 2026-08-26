@@ -3,6 +3,8 @@
 #include <iomanip>
 #include <cstdint>
 #include <serialib.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #include <ruckig/ruckig.hpp>
 
@@ -75,6 +77,7 @@ static uint8_t g_motor_enable_mask = 0x3f; // bits 0..5: J1..J6, guarded by g_mt
 static bool   g_rehome_request = false;    // guarded by g_mtx
 static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
+static bool   g_sync_request = false;     // guarded by g_mtx
 
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
 // as the REPL; state out = a compact JSON line for the Python web UI.
@@ -91,6 +94,7 @@ static const char* HELP_TEXT =
     "  home                all joints to 0\n"
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
+    "  sync                align planner to motor feedback without motion\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -115,6 +119,7 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
+    if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
     if (tok[0] == "rehome") {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_motor_enable_mask = 0x3f;
@@ -200,10 +205,12 @@ static std::string handleCommand(const std::string& line) {
 // Background stdin REPL.
 static void inputThread() {
     std::cout << HELP_TEXT;
-    std::string line;
     while (g_running.load()) {
-        std::cout << "\n> " << std::flush;
-        if (!std::getline(std::cin, line)) { g_running = false; break; }  // Ctrl-D
+        char* raw = readline("\n> ");
+        if (!raw) { g_running = false; break; }  // Ctrl-D
+        std::string line(raw);
+        free(raw);
+        if (!line.empty()) add_history(line.c_str());
         std::string r = handleCommand(line);
         if (!r.empty()) std::cout << r << "\n";
     }
@@ -320,6 +327,7 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             if (g_have_new) {
+
                 for (int i = 0; i < DOFs; i++) input.target_position[i] = g_target[i];
                 g_have_new = false;
             }
@@ -339,6 +347,17 @@ int main(int argc, char** argv) {
                 }
                 g_stop_request = false;
             }
+            if (g_sync_request) {
+                // Adopt motor feedback as the planner state. The ESP re-references
+                // its queue on the 0x80 bit, so this produces no motion.
+                for (int i = 0; i < DOFs; i++) {
+                    input.current_position[i]     = rx_packet.actual_position[i];
+                    input.current_velocity[i]     = 0.0;
+                    input.current_acceleration[i] = 0.0;
+                    input.target_position[i]      = rx_packet.actual_position[i];
+                    g_target[i]                   = rx_packet.actual_position[i];
+                }
+            }
             if (g_rehome_request) {
                 for (int i = 0; i < DOFs; i++) {
                     input.current_position[i] = 0.0;
@@ -354,7 +373,7 @@ int main(int argc, char** argv) {
         }
 
         auto res = ruck.update(input, output);
-        
+
         // Pass output state to the next cycle's input
         input.current_position = output.new_position;
         input.current_velocity = output.new_velocity;
@@ -367,8 +386,11 @@ int main(int argc, char** argv) {
                         tx_packet.vel_cmd[i] = g_rehome_hold ? 0.0f : output.new_velocity[i];
         }
                 { std::lock_guard<std::mutex> lk(g_mtx);
-                    tx_packet.motor_enable_mask = g_motor_enable_mask | (g_rehome_request ? 0x40 : 0);
-                    g_rehome_request = false; }
+                    tx_packet.motor_enable_mask = g_motor_enable_mask
+                        | (g_rehome_request ? 0x40 : 0)
+                        | (g_sync_request ? 0x80 : 0);
+                    g_rehome_request = false;
+                    g_sync_request = false; }
         output.pass_to_input(input);
 
         // 2. Send Velocity Command (COBS-framed + CRC16)
@@ -384,18 +406,23 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 4. Optional live telemetry -- throttled to ~5 Hz on a single line so it
-        //    doesn't flood the REPL. Toggle with the 'mon' command (off by default).
+        // 4. Optional live telemetry at ~5 Hz. Toggle with 'mon'.
         static int telem = 0;
         if (g_monitor.load() && (++telem % 100 == 0)) {
-            std::cout << "\r[mon] " << std::fixed << std::setprecision(2)
-                      << "J1:" << std::setw(7) << rx_packet.actual_position[0]
-                      << " J2:" << std::setw(7) << rx_packet.actual_position[1]
-                      << " J3:" << std::setw(7) << rx_packet.actual_position[2]
-                      << " J4:" << std::setw(7) << rx_packet.actual_position[3]
-                      << " J5:" << std::setw(7) << rx_packet.actual_position[4]
-                      << " J6:" << std::setw(7) << rx_packet.actual_position[5]
-                      << "     " << std::flush;
+            const float* a = rx_packet.actual_position;
+            const float* c = tx_packet.pos_cmd;
+            const double* tg = input.target_position.data();
+            std::fprintf(stdout,
+                "[mon] act  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
+                "      cmd  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
+                "      tgt  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
+                "      err  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n",
+                a[0],a[1],a[2],a[3],a[4],a[5],
+                c[0],c[1],c[2],c[3],c[4],c[5],
+                tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
+                a[0]-c[0], a[1]-c[1], a[2]-c[2],
+                a[3]-c[3], a[4]-c[4], a[5]-c[5]);
+            std::fflush(stdout);
         }
 
         // Publish state to the web UI over UDP at ~30 Hz.
