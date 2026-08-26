@@ -159,7 +159,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
     }
     applied_motor_enable_mask = requested_mask;
 
-    if (rx_packet.motor_enable_mask & 0x40) {
+    if (rx_packet.motor_enable_mask & FLAG_REHOME) {
         homeAxis(1);
         homeAxis(2);
         homeAxis(3);
@@ -177,7 +177,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
 
     // Sync (0x80): re-reference the queue to the executed position so the host
     // can adopt motor feedback as its planner state without commanding motion.
-    if (rx_packet.motor_enable_mask & 0x80) {
+    if (rx_packet.motor_enable_mask & FLAG_SYNC) {
         for (int i = 0; i < 6; i++) {
             queued_steps[i] = steppers[i]->getCurrentPosition();
             tick_error[i] = 0;
@@ -192,6 +192,13 @@ void onPacket(const uint8_t* buffer, size_t size) {
     for (int i = 0; i < 6; i++) {
         if (!(requested_mask & (1u << i))) {
             queued_steps[i] = steppers[i]->getCurrentPosition();
+            continue;
+        }
+
+        // FLAG_HOLD: host is initializing; keep torque on but skip motion.
+        if (rx_packet.flags & FLAG_HOLD) {
+            queued_steps[i] = steppers[i]->getCurrentPosition();
+            tick_error[i] = 0;
             continue;
         }
 

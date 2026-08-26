@@ -266,13 +266,24 @@ int main(int argc, char** argv) {
     FrameReader<EspToPiPacket> rx_reader;
     uint8_t txbuf[frameMaxLen<PiToEspPacket>()];
     tx_packet.motor_enable_mask = 0x3f;
+    tx_packet.flags = FLAG_HOLD; // keep torque on, skip motion until pos received
 
-    // 1. Synchronize Initial Position
-    // The ESP32 only replies when we send something. Send a dummy zero-velocity packet.
-    serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
-    if (!readFramedPacket(serial, rx_reader, rx_packet, 200)) {
-        std::cerr << "Warning: no initial position received from ESP32!" << std::endl;
+    // Handshake: retry until we get actual position without commanding any motion.
+    bool got_initial_pos = false;
+    for (int retry = 0; retry < 30; retry++) {
+        serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
+        if (readFramedPacket(serial, rx_reader, rx_packet, 50)) {
+            got_initial_pos = true;
+            break;
+        }
     }
+    if (!got_initial_pos) {
+        std::cerr << "No position reply from ESP32 after 30 attempts. Is it running?\n";
+        serial.closeDevice();
+        return 1;
+    }
+    tx_packet.motor_enable_mask = 0x3f;
+    tx_packet.flags = 0;
 
     for (int i = 0; i < DOFs; i++) {
         float initial_rads = rx_packet.actual_position[i];
@@ -387,8 +398,8 @@ int main(int argc, char** argv) {
         }
                 { std::lock_guard<std::mutex> lk(g_mtx);
                     tx_packet.motor_enable_mask = g_motor_enable_mask
-                        | (g_rehome_request ? 0x40 : 0)
-                        | (g_sync_request ? 0x80 : 0);
+                        | (g_rehome_request ? FLAG_REHOME : 0)
+                        | (g_sync_request   ? FLAG_SYNC   : 0);
                     g_rehome_request = false;
                     g_sync_request = false; }
         output.pass_to_input(input);

@@ -25,9 +25,14 @@ struct EspToPiPacket {
 struct PiToEspPacket {
     float pos_cmd[6];         // Absolute target position, deg (24 bytes)
     float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
-    uint8_t motor_enable_mask;// Bits 0..5: J1..J6 enabled; bit 6: rehome request
+    uint8_t motor_enable_mask;// Bits 0..5: J1..J6 enabled; bit 6: rehome; bit 7: sync
+    uint8_t flags;            // FLAG_HOLD: report position, skip motion
 };
 #pragma pack(pop)
+
+static const uint8_t FLAG_HOLD   = 0x01;
+static const uint8_t FLAG_REHOME = 0x40;
+static const uint8_t FLAG_SYNC   = 0x80;
 
 // ---------------------------------------------------------------------------
 // CRC16-CCITT (poly 0x1021, init 0xFFFF)
