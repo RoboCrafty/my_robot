@@ -396,6 +396,14 @@
       effort="300"
       velocity="3" />
   </joint>
+
+
+  <link name="tcp_link"/>
+  <joint name="tool_to_tcp" type="fixed">
+    <parent link="tool"/>
+    <child link="tcp_link"/>
+    <origin rpy="0 0 0" xyz="0 0 -0.085"/>
+  </joint>
   
 
   <transmission name="TRANS_L1"> 
