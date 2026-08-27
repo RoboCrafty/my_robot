@@ -9,9 +9,9 @@
 #include <BasicLinearAlgebra.h>
 #include <helper_functions.h>
 #include <structs.h>
+#include <PacketSerial.h>
 // #include <motion_planner.h>
-// #include <dds_stepgen.h>   // replaced by FastAccelStepper moveTo() approach
-#include <ruckig/ruckig.hpp>
+
 
 #define SERIAL_PORT1 Serial1
 #define SERIAL_PORT2 Serial2
@@ -32,10 +32,7 @@ const float STEPS_PER_DEG[6] = {
     Constants::Config::J5_STEPS_PER_DEG,
     Constants::Config::J6_STEPS_PER_DEG
 };
-// Ruckig Setup (Assuming 1000 Hz loop)
-ruckig::Ruckig<6> ruck(0.001); 
-ruckig::InputParameter<6> input;
-ruckig::OutputParameter<6> output;
+
 
 // To maintain exact timing
 unsigned long last_loop_time = 0;
@@ -62,84 +59,37 @@ uint8_t prevRampState[6] = {0, 0, 0, 0, 0, 0};
 // trim commanded speed (kept so the structure matches the source 1:1).
 const float axisVelScaleFactor = 1.0f;
 
-// ---------------------------------------------------------------------------
-// SERVO ISR @ 2 kHz (every 500 us) -- faithful port of ServoMovementCmds_ISR()
-// from the ESP32_LinuxCNC controller. Source of position/velocity is Ruckig
-// (via cmd_pos_steps[]/cmd_vel_mhz[]) instead of a LinuxCNC UDP packet. Only the
-// LinuxCNC feedback (fb.*), the debug axis-state console viz, and the ESP-NOW
-// telemetry were dropped; ALL motion-critical logic is preserved:
-//   * soft linear-accel start when a stationary axis begins moving,
-//   * conditional speed update with the +/-10000 mHz velDiff dead-zone,
-//   * on a LARGE deceleration we do NOT lower the speed limit -- we let moveTo()
-//     ramp down into the target so the stop isn't laggy,
-//   * switch to mild linear-accel once the axis reaches coast speed,
-//   * moveTo(absolute position) every cycle so position never drifts.
-// NOTE: moveTo()/setSpeedInMilliHz() are not in IRAM (same as the source lib).
-// Fine during steady-state motion; if you ever see random reboots, move this
-// body into a high-priority FreeRTOS task instead.
-// ---------------------------------------------------------------------------
-void IRAM_ATTR ServoMovementCmds_ISR() {
-    if (!machineEnabled) return;
+// PacketSerial = COBS framing over Serial. It handles delimiting/resync for us;
+// we add a CRC16 inside each payload (PacketSerial does not checksum).
+PacketSerial packetSerial;
+void onPacket(const uint8_t* buffer, size_t size); // defined below
 
-    for (int i = 0; i < 6; i++) {
-        if (!steppers[i]) continue;
-
-        uint32_t newVel = cmd_vel_mhz[i];   // |velocity| feedforward (milliHz)
-
-        if (newVel > 0) {                    // a move is wanted
-            bool isRampActive = steppers[i]->isRampGeneratorActive();
-
-            if (!isRampActive) {
-                // Initial move request (stationary -> moving): gentle soft start.
-                steppers[i]->setLinearAcceleration(2000);
-                steppers[i]->setSpeedInMilliHz(newVel / axisVelScaleFactor);
-            } else {
-                // Already moving: decide whether to push a new speed limit.
-                newVel = newVel / axisVelScaleFactor;
-                int32_t curSpeed = steppers[i]->getCurrentSpeedInMilliHz(true);
-                if (curSpeed < 0) curSpeed = -curSpeed;
-                const int32_t velDiff = (int32_t)newVel - (int32_t)(curSpeed / axisVelScaleFactor);
-
-                if (velDiff > 10000) {            // accelerating > 10 Hz
-                    steppers[i]->setLinearAcceleration(0);
-                    steppers[i]->setSpeedInMilliHz(newVel);
-                } else if (velDiff > -10000) {    // steady / mild change
-                    steppers[i]->setLinearAcceleration(0);
-                    steppers[i]->setSpeedInMilliHz(newVel);
-                }
-                // else: large deceleration -> KEEP the current (higher) speed
-                // limit and let moveTo() decelerate into the target. Lowering it
-                // here causes a laggy stop. (Critical line from the library.)
-            }
-
-            // Absolute position anchor -- always called so position never drifts.
-            MoveResultCode moveResult = steppers[i]->moveTo(cmd_pos_steps[i], false);
-
-            if (moveResult == MOVE_OK && steppers[i]->isRampGeneratorActive()) {
-                uint8_t rampState = steppers[i]->rampState();
-                if (rampState != prevRampState[i]) {
-                    if (rampState & RAMP_STATE_COAST) {
-                        // Reached coasting/at-speed: relax to mild linear accel.
-                        steppers[i]->setLinearAcceleration(100);
-                    }
-                    prevRampState[i] = rampState;
-                }
-            }
-        }
-    }
-}
+// --- moveTimed feeder (step-separated, per FastAccelStepper issue #363) ---
+// TICKS_PER_S and MIN_CMD_TICKS are provided by FastAccelStepper (pd_config.h).
+static const uint32_t CTRL_TICKS         = TICKS_PER_S / 500; // 2 ms control period
+static const uint32_t MIN_TICKS_PER_STEP = 160;             // ~100 kHz per-step ceiling guard
+static const float    V_FLOOR            = 1.0f;            // steps/s below which we don't rate-time
+int32_t  queued_steps[6]      = {0, 0, 0, 0, 0, 0};        // steps already appended per axis
+uint32_t movetimed_underruns  = 0;                         // diagnostics: queue-empty events
+int32_t tick_error[6] = {0, 0, 0, 0, 0, 0};                // Tracks accumulated timer quantization error per axis (in ticks)
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(921600);
+    Serial.setTimeout(2);
     Serial1.begin(115200, SERIAL_8N1, TMC_RX, TMC_TX);
     Serial2.begin(115200, SERIAL_8N1, TMC2_RX, TMC2_TX);
 
+    // Route PacketSerial over the USB UART and register the frame callback.
+    packetSerial.setStream(&Serial);
+    packetSerial.setPacketHandler(&onPacket);
+
     // Initialise
-    delay(1000);
-    Serial.println("\n--- Initializing System ---");
-    delay(100);
+    // delay(1000);
+    // // Serial.println("\n--- Initializing System ---");
+    // delay(100);
 
     initJoints(1, 1, 1, 1, 1, 1, 1);
+    // initJoints(1, 0, 0, 0, 0, 0, 0);
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
@@ -151,173 +101,215 @@ void setup() {
             steppers[i]->setAutoEnable(true);
             // High accel so FAS faithfully follows Ruckig's commanded velocity
             // each cycle -- Ruckig already does the jerk-limited smoothing.
-            steppers[i]->setAcceleration(10000);
+            steppers[i]->setAcceleration(6000);
             steppers[i]->setSpeedInHz(6000);        // safe initial speed
             steppers[i]->applySpeedAcceleration();
             steppers[i]->setCurrentPosition(0);
         }
     }
 
-    // homeAxis(1);
-    // homeAxis(2);
-    // homeAxis(3);
-    // homeAxis(4);
-    // homeAxis(6);
-    // homeAxis(5);
+    homeAxis(1);
+    homeAxis(2);
+    homeAxis(3);
+    homeAxis(4);
+    homeAxis(6);
+    homeAxis(5);
     delay(3000); // Wait for homing to complete
 
 
 
     for (int i = 0; i < 6; i++) {
-
-        steppers[i]->setAcceleration(1000000);
-        steppers[i]->setSpeedInHz(1000);        // safe initial speed
-        steppers[i]->applySpeedAcceleration();
         steppers[i]->setCurrentPosition(0);
     }
-    // 2. Setup Ruckig limits (radians) and targets
-    for(int i=0; i<6; i++) {
-        input.current_position[i] = 0.0;
-        input.current_velocity[i] = 0.0;
-        input.current_acceleration[i] = 0.0;
-        
-        input.target_position[i] = 0.0; 
-        input.target_velocity[i] = 0.0;
-        input.target_acceleration[i] = 0.0;
 
-        // Time sync = all axes finish together (coordinated). DO NOT use Phase:
-        // when only some axes move (zero displacement on the rest) Phase sync is
-        // degenerate for the single-precision solver and produces -110 errors
-        // plus occasional garbage positions that jam the controller.
-        // input.synchronization = ruckig::Synchronization::Time;
 
-        // Cap each axis' velocity in STEP space (so high-resolution axes don't
-        // demand absurd step rates), then convert to rad/s for Ruckig.
-        const float MAX_DEG_PER_SEC = 50;                 // steps/s ceiling per axis
-        float max_rad_per_s = degToRad(MAX_DEG_PER_SEC);
-        input.max_velocity[i]     = max_rad_per_s / 1;
-        input.max_acceleration[i] = max_rad_per_s * 5.0;   // reach max vel in ~0.25 s
-        input.max_jerk[i]         = max_rad_per_s * 10.0f;
-    }
-    // t0 = 20;
-    // t1 = 20;
-    // t2 = -20;
-    // t3 = -90;
-    // t4 = 90;
-    t0 = 0;
-    t1 = 0;
-    t2 = 0;
-    t3 = 0;
-    t4 = 0;
-    t5 = 150;
-    input.target_position[0] = degToRad(t0);
-    input.target_position[1] = degToRad(t1);
-    input.target_position[2] = degToRad(t2);
-    input.target_position[3] = degToRad(t3);
-    input.target_position[4] = degToRad(t4);
-    input.target_position[5] = degToRad(t5);
-
-    // --- Start the 2 kHz servo ISR (every 500 us) ---
-    // servoTimer = timerBegin(1000000);                  // 1 MHz base
-    // timerAttachInterrupt(servoTimer, &ServoMovementCmds_ISR);
-    // timerAlarm(servoTimer, 500, true, 0);              // 500 ticks = 500 us = 2 kHz
-    // machineEnabled = true;
-
-    last_loop_time = micros();
+    last_loop_time = millis();
 }
-bool toggle = true;
-void loop() {
-    unsigned long current_time = micros();
-    
-    // Check if 1000 microseconds have passed
-    if (current_time - last_loop_time >= 1000) {
-        
-        // BUGFIX: Add exactly 1000 to keep the clock perfectly rigid!
-        // if (current_time - last_loop_time > 5000) {
-        //     last_loop_time = current_time;
-        // } else {
-            last_loop_time += 1000;
-        // }
 
-        auto result = ruck.update(input, output);
 
-        if (result == ruckig::Result::Working) {
+PiToEspPacket rx_packet;
+EspToPiPacket tx_packet;
+uint8_t applied_motor_enable_mask = 0x3f;
 
-            // portENTER_CRITICAL(&myMutex);
-            for (int i = 0; i < 6; i++) {
-                // Absolute position target (steps) + velocity feedforward (milliHz)
-                float pos_steps = radToDeg(output.new_position[i]) * STEPS_PER_DEG[i];
-                float vel_hz    = radToDeg(output.new_velocity[i]) * STEPS_PER_DEG[i];
-                
-                cmd_pos_steps[i] = (int32_t)lroundf(pos_steps);
-                cmd_vel_mhz[i]   = (uint32_t)(fabsf(vel_hz) * 1000.0f);   // steps/s -> milliHz
+// Called by PacketSerial once a complete COBS frame has been received and
+// un-stuffed. Framing/resync is handled by the library; we verify the CRC16
+// we appended to the payload, then act and reply.
+void onPacket(const uint8_t* buffer, size_t size) {
+    if (size != sizeof(PiToEspPacket) + 2) return;             // wrong length
+    uint16_t crc = crc16_ccitt(buffer, sizeof(PiToEspPacket));
+    uint16_t rx  = (uint16_t)buffer[sizeof(PiToEspPacket)] |
+                   ((uint16_t)buffer[sizeof(PiToEspPacket) + 1] << 8);
+    if (crc != rx) return;                                     // corrupt -> ignore
 
-                steppers[i]->setSpeedInMilliHz(cmd_vel_mhz[i]);
-                steppers[i]->moveTo(cmd_pos_steps[i], false);
+    memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
+
+    uint8_t requested_mask = rx_packet.motor_enable_mask & 0x3f;
+    uint8_t changed_mask = requested_mask ^ applied_motor_enable_mask;
+    for (int i = 0; i < 6; i++) {
+        if (changed_mask & (1u << i)) {
+            if (requested_mask & (1u << i)) {
+                turnDriverOn(i + 1);
+            } else {
+                int32_t executed_steps = steppers[i]->getCurrentPosition();
+                steppers[i]->forceStopAndNewPosition(executed_steps);
+                queued_steps[i] = executed_steps;
+                turnDriverOff(i + 1);
             }
-            // portEXIT_CRITICAL(&myMutex);
-            output.pass_to_input(input);
-
-        } else if (result == ruckig::Result::Finished) {
-
-            // Serial.println("Ruckig trajectory finished. ");
-            // Hold position: feedforward velocity 0, target already at goal.
-            for (int i = 0; i < 6; i++) {
-                cmd_vel_mhz[i] = 0;
-                steppers[i]->setSpeedInMilliHz(cmd_vel_mhz[i]);
-            }
-            output.pass_to_input(input);
-            // Resync Ruckig's current position to the actual stepper position
-            // (moveTo locks position so these already match -- belt & braces).
-            // for(int i = 0; i < 6; i++) {
-            //     if (steppers[i]) {
-            //         float physical_degrees = (float)steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
-            //         input.current_position[i] = degToRad(physical_degrees);
-            //     }
-            // }
-            if (toggle){
-                input.target_position[0] = degToRad(0.0);
-                input.target_position[1] = degToRad(0.0);
-                input.target_position[2] = degToRad(0.0);
-                input.target_position[3] = degToRad(0.0);
-                input.target_position[4] = degToRad(0.0);
-                input.target_position[5] = degToRad(0.0);
-                toggle = false;
-            }
-            else
-            {
-                input.target_position[0] = degToRad(t0);
-                input.target_position[1] = degToRad(t1);
-                input.target_position[2] = degToRad(t2);
-                input.target_position[3] = degToRad(t3);
-                input.target_position[4] = degToRad(t4);
-                input.target_position[5] = degToRad(t5);
-                toggle = true;
-            }
-            
-            // Serial.print("Current: ");
-            // Serial.print(radToDeg(input.current_position[5]));
-            // Serial.print("  Target: ");
-            // Serial.println(radToDeg(input.target_position[5]));
-        }
-        else if (result < 0) {
-            // CATCH ERRORS: If Ruckig crashes, print it so we know!
-            // Serial.print("RUCKIG ERROR CODE: ");
-            // Serial.println(result);
-
-            // RECOVER: re-seed Ruckig from the actual stepper positions and zero
-            // out velocity/acceleration. Without this, a single bad update leaves
-            // current_position corrupt and every following update returns -110
-            // forever (the endless error wall). This unjams the controller.
-            // for (int i = 0; i < 6; i++) {
-            //     cmd_vel_mhz[i] = 0;
-            //     float physical_deg = steppers[i]
-            //         ? (float)steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i]
-            //         : 0.0f;
-            //     input.current_position[i]     = degToRad(physical_deg);
-            //     input.current_velocity[i]     = 0.0;
-            //     input.current_acceleration[i] = 0.0;
-            // }
         }
     }
+    applied_motor_enable_mask = requested_mask;
+
+    if (rx_packet.motor_enable_mask & FLAG_REHOME) {
+        homeAxis(1);
+        homeAxis(2);
+        homeAxis(3);
+        homeAxis(4);
+        homeAxis(6);
+        homeAxis(5);
+        delay(3000);
+        for (int i = 0; i < 6; i++) {
+            steppers[i]->forceStopAndNewPosition(0);
+            queued_steps[i] = 0;
+            tick_error[i] = 0;
+        }
+        tx_packet.homing_sequence++;
+    }
+
+    // Sync (0x80): re-reference the queue to the executed position so the host
+    // can adopt motor feedback as its planner state without commanding motion.
+    if (rx_packet.motor_enable_mask & FLAG_SYNC) {
+        for (int i = 0; i < 6; i++) {
+            queued_steps[i] = steppers[i]->getCurrentPosition();
+            tick_error[i] = 0;
+        }
+    }
+
+    // --- moveTimed feeder (step-separated, per gin66 issue #363) ---
+    // Steps are pinned to the commanded POSITION (drift-free); each command's
+    // DURATION is derived from the commanded VELOCITY, so the step RATE is
+    // constant within the command -- this avoids the fixed-1ms-frame
+    // quantization that produces the harsh 1/2-step-per-frame speed noise.
+    for (int i = 0; i < 6; i++) {
+        if (!(requested_mask & (1u << i))) {
+            queued_steps[i] = steppers[i]->getCurrentPosition();
+            continue;
+        }
+
+        // FLAG_HOLD: host is initializing; keep torque on but skip motion.
+        if (rx_packet.flags & FLAG_HOLD) {
+            queued_steps[i] = steppers[i]->getCurrentPosition();
+            tick_error[i] = 0;
+            continue;
+        }
+
+        int32_t target = lroundf(rx_packet.pos_cmd[i] * STEPS_PER_DEG[i]);
+        int32_t n      = target - queued_steps[i];                  
+        // FIX: Clamp `n` to int16_t bounds so the physical motor and planner never desync
+        if (n > 32767) n = 32767;
+        if (n < -32768) n = -32768;      
+        float   v      = fabsf(rx_packet.vel_cmd[i]) * STEPS_PER_DEG[i];  
+
+        if (n == 0) {
+            if (!steppers[i]->isRunning() || steppers[i]->isQueueEmpty()) {
+                steppers[i]->moveTimed(0, CTRL_TICKS, nullptr, true);
+            }
+            tick_error[i] = 0; // Reset error wind-up when stopped
+            continue;
+        }
+
+        uint32_t abs_n = (n < 0) ? (uint32_t)(-n) : (uint32_t)n;
+        uint32_t ideal_duration;
+
+        if (v > V_FLOOR) {
+            ideal_duration = (uint32_t)(((float)abs_n * (float)TICKS_PER_S) / v);
+        } else {
+            // "Catch-up" block for leftover steps when v == 0
+            float safe_catchup_speed = 2000.0f; 
+            ideal_duration = (uint32_t)(((float)abs_n * (float)TICKS_PER_S) / safe_catchup_speed);
+            tick_error[i] = 0; // Reset error, we are off the ideal timeline anyway
+        }
+
+        // Apply our accumulated error to the requested duration
+        int32_t requested_duration = (int32_t)ideal_duration - tick_error[i];
+
+        // A very slow (time-synchronized) axis would otherwise stretch one step
+        // across many control periods, keeping FAS BUSY so queued_steps lags the
+        // target; the backlog then flushes in one burst at end-of-move (the J4
+        // jump + lost steps). Cap the command so the axis frees up each cycle.
+        bool capped = false;
+        if (requested_duration > (int32_t)(2 * CTRL_TICKS)) {
+            requested_duration = (int32_t)(2 * CTRL_TICKS);
+            capped = true;
+        }
+
+        // Clamp to safe limits based on the library's requirements
+        uint32_t min_dur = abs_n * MIN_TICKS_PER_STEP;
+        if (requested_duration < (int32_t)min_dur) requested_duration = min_dur;
+        if (requested_duration < MIN_CMD_TICKS)    requested_duration = MIN_CMD_TICKS;
+
+        uint32_t actual_duration = 0;
+        MoveTimedResultCode r = steppers[i]->moveTimed((int16_t)n, (uint32_t)requested_duration, &actual_duration, true);
+        
+        if (r == MOVE_TIMED_OK || r == MOVE_TIMED_EMPTY) {
+            queued_steps[i] += n;                                 
+            if (r == MOVE_TIMED_EMPTY) movetimed_underruns++;     
+
+            // Accumulate timer-quantization error only while tracking the ideal
+            // timeline; when capped the timeline is intentionally abandoned.
+            if (v > V_FLOOR && !capped) {
+                tick_error[i] += ((int32_t)actual_duration - (int32_t)ideal_duration);
+            } else {
+                tick_error[i] = 0;
+            }
+        }
+    }
+
+    // Feedback: report the actual (as-executed) position from the step counter.
+    for (int i = 0; i < 6; i++) {
+        tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
+    }
+    uint8_t payload[sizeof(EspToPiPacket) + 2];
+    memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
+    uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));
+    payload[sizeof(EspToPiPacket)]     = (uint8_t)(tcrc & 0xFF);
+    payload[sizeof(EspToPiPacket) + 1] = (uint8_t)(tcrc >> 8);
+    packetSerial.send(payload, sizeof(payload)); // PacketSerial COBS-frames it
+}
+
+
+void loop() {
+    unsigned long current_time = millis();
+
+    // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
+    packetSerial.update();
+
+    if (current_time - last_loop_time >= 100) {
+        last_loop_time += 100;
+        // printLimitSwitchStates();
+    }
+        
+}
+
+void moveJoint()
+{
+
+}
+
+void printLimitSwitchStates()
+{
+    Serial.printf(
+            "Limits raw: J1=%d J2=%d J3=%d J4=%d J5=%d J6=%d | triggered: J1=%d J2=%d J3=%d J4=%d J5=%d J6=%d\n",
+            digitalRead(Constants::Pins::L1_PIN),
+            digitalRead(Constants::Pins::L2_PIN),
+            digitalRead(Constants::Pins::L3_PIN),
+            digitalRead(Constants::Pins::L4_PIN),
+            digitalRead(Constants::Pins::L5_PIN),
+            digitalRead(Constants::Pins::L6_PIN),
+            isLimitSwitchTriggered(1),
+            isLimitSwitchTriggered(2),
+            isLimitSwitchTriggered(3),
+            isLimitSwitchTriggered(4),
+            isLimitSwitchTriggered(5),
+            isLimitSwitchTriggered(6));
+    
 }

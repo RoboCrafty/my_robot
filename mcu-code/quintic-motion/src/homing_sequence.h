@@ -35,7 +35,7 @@ namespace Constants{
         constexpr int16_t J3_HOMED_POSITION = -71 * Constants::Config::J3_STEPS_PER_DEG;
         constexpr int16_t J4_HOMED_POSITION = 143 * Constants::Config::J4_STEPS_PER_DEG;
         constexpr int16_t J5_HOMED_POSITION = -125 * Constants::Config::J5_STEPS_PER_DEG;
-        constexpr int16_t J6_HOMED_POSITION = 190 * Constants::Config::J6_STEPS_PER_DEG;
+        constexpr int16_t J6_HOMED_POSITION = 285 * Constants::Config::J6_STEPS_PER_DEG;
     }
     
 

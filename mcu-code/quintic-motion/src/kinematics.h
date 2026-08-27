@@ -147,7 +147,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_Pos(BLA::Matrix<6, 1, float>& cu
         // start_time = micros();
         current_rot_matrix = T0_ee.Submatrix<3,3>(0,0);
         target_rot_matrix = getRotationMatrix(target_pose(3), target_pose(4), target_pose(5));
-        rotation_err = target_rot_matrix * BLA::MatrixTranspose(current_rot_matrix);
+        rotation_err = target_rot_matrix * ~current_rot_matrix;
         // end_time = micros();
         // time = (float)(end_time - start_time);
         // Serial.print("Time taken for step 3: "); Serial.print(time); Serial.println(" microseconds");
@@ -173,14 +173,14 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_Pos(BLA::Matrix<6, 1, float>& cu
         
 
         // start_time = micros();
-        J_dampened_least_squares = (Jacobian * BLA::MatrixTranspose(Jacobian) + dampening_factor*dampening_factor * I); // step 6
+        J_dampened_least_squares = (Jacobian * ~Jacobian + dampening_factor*dampening_factor * I); // step 6
         // end_time = micros();
         // time = (float)(end_time - start_time);
         // Serial.print("Time taken for step 6: "); Serial.print(time); Serial.println(" microseconds");
         
 
         // start_time = micros();
-        J_dampened_least_squares = BLA::MatrixTranspose(Jacobian) * BLA::Inverse(J_dampened_least_squares); //step 7
+        J_dampened_least_squares = ~Jacobian * BLA::Inverse(J_dampened_least_squares); //step 7
         // end_time = micros();
         // time = (float)(end_time - start_time);
         // Serial.print("Time taken for step 7: "); Serial.print(time); Serial.println(" microseconds");
@@ -297,7 +297,7 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float>& c
     // start_time = micros();
     current_rot_matrix = T0_ee.Submatrix<3,3>(0,0);
     target_rot_matrix = getRotationMatrix(target_pose(3), target_pose(4), target_pose(5));
-    rotation_err = target_rot_matrix * BLA::MatrixTranspose(current_rot_matrix);
+    rotation_err = target_rot_matrix * ~current_rot_matrix;
     // end_time = micros();
     // time = (float)(end_time - start_time);
     // Serial.print("Time taken for step 3: "); Serial.print(time); Serial.println(" microseconds");
@@ -325,14 +325,14 @@ inline BLA::Matrix<6, 1, float> IRAM_ATTR getIK_RRMC(BLA::Matrix<6, 1, float>& c
     
 
     // start_time = micros();
-    J_dampened_least_squares = (Jacobian * BLA::MatrixTranspose(Jacobian) + dampening_factor*dampening_factor * I); // step 6
+    J_dampened_least_squares = (Jacobian * ~Jacobian + dampening_factor*dampening_factor * I); // step 6
     // end_time = micros();
     // time = (float)(end_time - start_time);
     // Serial.print("Time taken for step 6: "); Serial.print(time); Serial.println(" microseconds");
     
 
     // start_time = micros();
-    J_dampened_least_squares = BLA::MatrixTranspose(Jacobian) * BLA::Inverse(J_dampened_least_squares); //step 7
+    J_dampened_least_squares = ~Jacobian * BLA::Inverse(J_dampened_least_squares); //step 7
     // end_time = micros();
     // time = (float)(end_time - start_time);
     // Serial.print("Time taken for step 7: "); Serial.print(time); Serial.println(" microseconds");

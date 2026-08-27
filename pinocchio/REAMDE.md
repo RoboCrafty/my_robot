@@ -1,0 +1,1 @@
+This dir is for development of a new control software for my robotarm but this time all the motion planner / IK stuff will happen on a higher level controller as opposed to on the esp32 itself. 

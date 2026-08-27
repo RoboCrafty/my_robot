@@ -279,3 +279,57 @@ void initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool st
     }
 
 }
+
+void turnDriverOff (uint motorNo)
+{
+    switch (motorNo)
+    {
+        case 1:
+            J1_driver.toff(0);
+            break;
+        case 2:
+            J2_driver.toff(0);
+            break;
+        case 3:
+            J3_driver.toff(0);
+            break;
+        case 4:
+            J4_driver.toff(0);
+            break;
+        case 5:
+            J5_driver.toff(0);
+            break;
+        case 6:
+            J6_driver.toff(0);
+            break;
+        default:
+            break;
+    }
+}
+
+void turnDriverOn (uint motorNo)
+{
+    switch (motorNo)
+    {
+        case 1:
+            J1_driver.toff(2);
+            break;
+        case 2:
+            J2_driver.toff(2);
+            break;
+        case 3:
+            J3_driver.toff(2);
+            break;
+        case 4:
+            J4_driver.toff(2);
+            break;
+        case 5:
+            J5_driver.toff(2);
+            break;
+        case 6:
+            J6_driver.toff(2);
+            break;
+        default:
+            break;
+    }
+}

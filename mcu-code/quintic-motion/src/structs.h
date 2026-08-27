@@ -1,5 +1,41 @@
 #pragma once
 
+#include <stdint.h>
+#include <stddef.h>
+
+// --- Pi <-> ESP32 packet layout (MUST match the Raspberry Pi protocol.h) ---
+#pragma pack(push, 1) // exact byte alignment across both platforms
+struct EspToPiPacket {
+    float actual_position[6]; // 24 bytes
+    uint8_t homing_sequence;  // Increments after each completed rehome
+};
+
+struct PiToEspPacket {
+    float pos_cmd[6];         // Absolute target position, deg (24 bytes)
+    float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
+    uint8_t motor_enable_mask;// Bits 0..5: J1..J6 enabled; bit 6: rehome; bit 7: sync
+    uint8_t flags;            // FLAG_HOLD: report position, skip motion
+};
+#pragma pack(pop)
+
+static const uint8_t FLAG_HOLD   = 0x01;
+static const uint8_t FLAG_REHOME = 0x40;
+static const uint8_t FLAG_SYNC   = 0x80;
+
+// CRC16-CCITT (poly 0x1021, init 0xFFFF). PacketSerial does the COBS framing;
+// this verifies the payload inside a frame wasn't corrupted on the wire.
+inline uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
+
 struct Joints {
     float q1, q2, q3, q4, q5, q6;
 };
@@ -14,7 +50,6 @@ struct TrigValues {
     float s1, s2, s3, s4, s5, s6;
     float c1, c2, c3, c4, c5, c6;
 };
-
 
 // Toggle this: 1 to enable debug prints, 0 to disable completely
 #define DEBUG_MODE 0
