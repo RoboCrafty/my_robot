@@ -17,6 +17,8 @@
 //
 #include <pinocchio/src/math/rpy.hxx>
 
+#include "benchmark.h"
+
 Eigen::VectorXd getAngle();
 void benchmarkKinematics(pinocchio::Data &data, pinocchio::FrameIndex tool_frame);
 pinocchio::Model model;
@@ -55,57 +57,9 @@ int main() {
     // pinocchio::computeFrameJacobian(model, data, r, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED,J);
     // std::cout << "Jacobian is: \n" << J << std::endl;
 
-    benchmarkKinematics(data, tool_frame);
+    benchmarkKinematics(model, data, tool_frame);
 }   
 
-
-Eigen::VectorXd getAngle()
-{
-    std::cout << "Enter the joint angles (in degrees) for the " << model.nq << " joints, separated by spaces:\n";
-    Eigen::VectorXd q_input(model.nq);
-    for (int i = 0; i < model.nq; ++i) {
-        std::cin >> q_input[i];
-    }
-    return q_input * M_PI / 180.0; // Convert degrees to radians
-}
-
-void benchmarkKinematics(pinocchio::Data &data, pinocchio::FrameIndex tool_frame)
-{
-    constexpr std::size_t benchmark_iterations = 10000;
-    using Clock = std::chrono::steady_clock;
-
-    std::vector<Eigen::VectorXd> configurations;
-    configurations.reserve(benchmark_iterations);
-    for (std::size_t iteration = 0; iteration < benchmark_iterations; ++iteration) {
-        configurations.push_back(pinocchio::randomConfiguration(model));
-    }
-
-    const auto fk_start = Clock::now();
-    for (const auto &configuration : configurations) {
-        pinocchio::framesForwardKinematics(model, data, configuration);
-    }
-    const auto fk_end = Clock::now();
-
-    const auto jacobian_start = Clock::now();
-    for (const auto &configuration : configurations) {
-        J.setZero();
-        pinocchio::computeFrameJacobian(
-            model, data, configuration, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED, J);
-    }
-    const auto jacobian_end = Clock::now();
-
-    const auto fk_microseconds =
-        std::chrono::duration<double, std::micro>(fk_end - fk_start).count();
-    const auto jacobian_microseconds =
-        std::chrono::duration<double, std::micro>(jacobian_end - jacobian_start).count();
-
-    std::cout << std::fixed << std::setprecision(3)
-              << "\nBenchmark over " << benchmark_iterations << " random poses:\n"
-              << "Forward kinematics: " << fk_microseconds / benchmark_iterations
-              << " us average (" << fk_microseconds / 1000.0 << " ms total)\n"
-              << "Tool-frame Jacobian: " << jacobian_microseconds / benchmark_iterations
-              << " us average (" << jacobian_microseconds / 1000.0 << " ms total)\n";
-}
 
 // Eigen::MatrixXd getJacobian(Eigen::VectorXd q_input)
 // {
