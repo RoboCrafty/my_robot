@@ -26,9 +26,10 @@ target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 # target_link_libraries(controller PRIVATE PkgConfig::ZeroMQ pinocchio::pinocchio)
 target_link_libraries(parolController ruckig::ruckig Threads::Threads readline)
 
-find_package(pinocchio)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(pinocchio REQUIRED)
 add_executable(parolFk src/pinocchio.cpp)
 target_include_directories(parolFk PRIVATE ${pinocchio_INCLUDE_DIRS})
-target_link_libraries(parolFk PRIVATE pinocchio::pinocchio)
+target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio)
 target_compile_definitions(parolFk PRIVATE
   PAROL_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/assets/parol6.urdf")
