@@ -19,11 +19,19 @@
 
 #include "benchmark.h"
 
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json
+
+
+
 Eigen::VectorXd getAngle();
 void benchmarkKinematics(pinocchio::Data &data, pinocchio::FrameIndex tool_frame);
 pinocchio::Model model;
 pinocchio::Data::Matrix6x J(6, model.nv);
 int main() {
+    json j;
+    j.dump();
     pinocchio::urdf::buildModel(PAROL_URDF_PATH, model);
     pinocchio::Data data(model);
     J.resize(6, model.nv);
@@ -57,7 +65,7 @@ int main() {
     // pinocchio::computeFrameJacobian(model, data, r, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED,J);
     // std::cout << "Jacobian is: \n" << J << std::endl;
 
-    benchmarkKinematics(model, data, tool_frame);
+    // benchmarkKinematics(model, data, tool_frame);
 }   
 
 

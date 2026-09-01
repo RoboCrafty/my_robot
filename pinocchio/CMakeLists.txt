@@ -16,20 +16,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ruckig)
 
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+
+FetchContent_MakeAvailable(json)
+
 find_package(Threads REQUIRED)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(pinocchio REQUIRED)
 
 add_executable(parolController 
                 src/main.cpp
                 src/serialib.cpp)
 
 target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-# target_link_libraries(controller PRIVATE PkgConfig::ZeroMQ pinocchio::pinocchio)
 target_link_libraries(parolController ruckig::ruckig Threads::Threads readline)
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-find_package(pinocchio REQUIRED)
+
 add_executable(parolFk src/pinocchio.cpp)
 target_include_directories(parolFk PRIVATE ${pinocchio_INCLUDE_DIRS})
-target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio)
+target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio nlohmann_json::nlohmann_json)
+
+
 target_compile_definitions(parolFk PRIVATE
   PAROL_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/assets/parol6.urdf")
