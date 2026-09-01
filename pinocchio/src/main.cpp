@@ -79,6 +79,20 @@ static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
 
+// Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
+// joint under Ruckig's Velocity control interface instead of Position. Each
+// non-zero entry carries a deadline; if the UI stops refreshing it (e.g. the
+// browser tab dies while a button is "held"), the loop zeroes it -- a
+// dead-man's-switch so a lost connection can't leave the arm jogging forever.
+static double  g_jog_vel[DOFs]         = {0};    // deg/s, guarded by g_mtx
+static int64_t g_jog_deadline_ns[DOFs] = {0};    // guarded by g_mtx
+static const int64_t JOG_TIMEOUT_NS = 300'000'000LL; // 300 ms watchdog
+
+// Zeroes all jog velocities/deadlines. Caller must already hold g_mtx.
+static void clearJogLocked() {
+    for (int i = 0; i < DOFs; i++) { g_jog_vel[i] = 0.0; g_jog_deadline_ns[i] = 0; }
+}
+
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
 // as the REPL; state out = a compact JSON line for the Python web UI.
 static int         g_udp_fd = -1;
@@ -91,6 +105,8 @@ static const char* HELP_TEXT =
     "  a1 a2 a3 a4 a5 a6   set all six joint targets (deg)\n"
     "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
     "  jog <j> <delta>     move one joint by a relative amount (deg)\n"
+    "  jogvel <j> <v>      velocity-jog one joint at v deg/s (0 to stop); \n"
+    "                      must be refreshed within 300ms or it auto-stops\n"
     "  home                all joints to 0\n"
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
@@ -118,7 +134,7 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
-    if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
+    if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
     if (tok[0] == "rehome") {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -126,6 +142,7 @@ static std::string handleCommand(const std::string& line) {
         g_target.fill(0.0);
         g_have_new = true;
         g_rehome_request = true;
+        clearJogLocked();
         return "rehoming";
     }
 
@@ -180,7 +197,27 @@ static std::string handleCommand(const std::string& line) {
             if (j < 1 || j > DOFs) return "joint must be 1..6";
             std::lock_guard<std::mutex> lk(g_mtx);
             g_target[j - 1] += d; g_have_new = true;
+            clearJogLocked();
             return "jog ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "jogvel") {
+        if (tok.size() != 3) return "usage: jogvel <j> <deg/s>";
+        try {
+            int j = std::stoi(tok[1]); double v = std::stod(tok[2]);
+            if (j < 1 || j > DOFs) return "joint must be 1..6";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            double cap = g_max_vel[j - 1];
+            if (v > cap) v = cap; else if (v < -cap) v = -cap; // Velocity control ignores max_velocity, so clamp here
+            g_jog_vel[j - 1] = v;
+            if (v != 0.0) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                g_jog_deadline_ns[j - 1] = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + JOG_TIMEOUT_NS;
+            } else {
+                g_jog_deadline_ns[j - 1] = 0;
+            }
+            return "jogvel ok";
         } catch (const std::exception&) { return "bad number"; }
     }
 
@@ -198,6 +235,7 @@ static std::string handleCommand(const std::string& line) {
             return "unrecognised command -- type 'help'";
         }
         g_have_new = true;
+        clearJogLocked();
         return "target updated";
     } catch (const std::exception&) { return "could not parse numbers"; }
 }
@@ -318,6 +356,7 @@ int main(int argc, char** argv) {
     struct timespec t_prev = next_tick, t_now;
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     double stats_window_us = 0;
+    bool   was_jogging = false; // owned by the control loop -- detects the jog->hold transition
 
     while (g_running.load()) {
 
@@ -380,6 +419,37 @@ int main(int argc, char** argv) {
                 }
                 g_rehome_hold = true;
                 g_rehome_completion = (uint8_t)(rx_packet.homing_sequence + 1);
+            }
+
+            // Velocity jogging ("hold the arrow" in the web UI). Watchdog first: a
+            // jog that hasn't been refreshed within JOG_TIMEOUT_NS auto-stops.
+            struct timespec jog_now; clock_gettime(CLOCK_MONOTONIC, &jog_now);
+            int64_t jog_now_ns = (int64_t)jog_now.tv_sec * 1000000000LL + jog_now.tv_nsec;
+            bool any_jog = false;
+            for (int i = 0; i < DOFs; i++) {
+                if (g_jog_vel[i] != 0.0 && jog_now_ns > g_jog_deadline_ns[i]) g_jog_vel[i] = 0.0;
+                if (g_jog_vel[i] != 0.0) any_jog = true;
+            }
+            if (any_jog) {
+                input.control_interface = ControlInterface::Velocity;
+                input.synchronization   = Synchronization::None;
+                for (int i = 0; i < DOFs; i++) {
+                    input.target_velocity[i]     = g_jog_vel[i];
+                    input.target_acceleration[i] = 0.0;
+                }
+                g_target = input.current_position; // keep the UI's target readout tracking live position
+                was_jogging = true;
+            } else if (was_jogging) {
+                // Last held arrow was released -> settle into a position hold right here.
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
+                for (int i = 0; i < DOFs; i++) {
+                    input.target_position[i]     = input.current_position[i];
+                    input.target_velocity[i]     = 0.0;
+                    input.target_acceleration[i] = 0.0;
+                }
+                g_target = input.current_position;
+                was_jogging = false;
             }
         }
 
