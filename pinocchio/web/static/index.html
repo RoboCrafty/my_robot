@@ -57,9 +57,14 @@
   <section class="panel span2">
     <h2>Joints</h2>
     <div class="toolbar">
-      <span class="mut">Jog speed °/s:</span>
+      <span class="mut">Jog mode:</span>
+      <div class="inc" id="modeBar"></div>
+      <span class="mut">Step:</span>
+      <div class="inc" id="incBar"></div>
+      <input type="number" id="incCustom" class="num" placeholder="deg" step="1" style="width:70px" />
+      <button class="btn sm" onclick="addIncrement()">＋ preset</button>
+      <span class="mut">Hold speed °/s:</span>
       <input type="number" id="jogSpeed" class="num" value="20" step="1" min="1" onchange="jogSpeed=+this.value||20" />
-      <span class="mut">(hold − / ＋ to move)</span>
     </div>
     <div id="joints"></div>
   </section>
@@ -114,7 +119,9 @@
 const NJ = 6, JMIN = -180, JMAX = 180;
 let state = { pos:Array(NJ).fill(0), tgt:Array(NJ).fill(0), vmax:Array(NJ).fill(0), amax:Array(NJ).fill(0), jmax:Array(NJ).fill(0), enabled:Array(NJ).fill(1) };
 let config = { poses:{}, sequences:{}, increments:[5,10,20] };
-let jogSpeed = 20;                 // deg/s while a jog arrow is held
+let selInc = 10;                   // deg per click (step mode)
+let jogSpeed = 20;                 // deg/s while a jog arrow is held (hold mode)
+let jogMode = 'step';               // 'step' | 'hold' -- explicit toggle, no tap/hold guessing
 const jogTimers = Array(NJ).fill(null); // per-joint setInterval id while an arrow is held
 let curSteps = [];                 // working sequence: [{pose, dwell}]
 const sliderBusy = Array(NJ).fill(0);
@@ -161,10 +168,10 @@ function buildJoints() {
     sl.addEventListener("input", () => { sliderBusy[j] = Date.now(); setJoint(j, sl.value); });
     r.querySelectorAll("[data-jog]").forEach(btn => {
       const [jj, dir] = btn.dataset.jog.split(":").map(Number);
-      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); startJog(jj, dir); });
-      btn.addEventListener("pointerup", () => stopJog(jj));
-      btn.addEventListener("pointerleave", () => stopJog(jj));
-      btn.addEventListener("pointercancel", () => stopJog(jj));
+      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); if (jogMode === 'hold') startJog(jj, dir); });
+      btn.addEventListener("pointerup", () => { if (jogMode === 'hold') stopJog(jj); else stepJog(jj, dir); });
+      btn.addEventListener("pointerleave", () => { if (jogMode === 'hold') stopJog(jj); });
+      btn.addEventListener("pointercancel", () => { if (jogMode === 'hold') stopJog(jj); });
     });
   }
 }
@@ -190,14 +197,17 @@ function onState(m) {
 function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
 function setJoint(j, val) { cmd(`${j+1} ${(+val).toFixed(3)}`); }
 
-// ---- Hold-to-jog (velocity control while the arrow is held) ----
+// ---- Jog: 'step' mode = discrete position move per click; 'hold' mode =
+// continuous velocity jog while the button is physically held. The mode is an
+// explicit toggle, not a timing guess, so there is no tap/hold ambiguity.
+function stepJog(j, dir) { cmd(`jog ${j+1} ${dir*selInc}`); sliderBusy[j] = Date.now(); }
 function sendJogVel(j, v) { cmd(`jogvel ${j+1} ${v.toFixed(2)}`); }
 function startJog(j, dir) {
   sliderBusy[j] = Date.now();
   sendJogVel(j, dir * jogSpeed);
   if (jogTimers[j]) clearInterval(jogTimers[j]);
-  // Refresh below the controller's 300ms watchdog so it never auto-stops mid-hold.
-  jogTimers[j] = setInterval(() => sendJogVel(j, dir * jogSpeed), 150);
+  // Refresh well below the controller's watchdog so it never auto-stops mid-hold.
+  jogTimers[j] = setInterval(() => sendJogVel(j, dir * jogSpeed), 60);
 }
 function stopJog(j) {
   if (jogTimers[j]) { clearInterval(jogTimers[j]); jogTimers[j] = null; }
@@ -206,6 +216,17 @@ function stopJog(j) {
 function stopAllJogs() { for (let j = 0; j < NJ; j++) stopJog(j); }
 window.addEventListener("blur", stopAllJogs);
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllJogs(); });
+
+function renderModes() {
+  const bar = document.getElementById("modeBar"); bar.innerHTML = "";
+  [['step','Step'], ['hold','Hold']].forEach(([val, label]) => {
+    const b = document.createElement("button");
+    b.className = "btn sm" + (val === jogMode ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { stopAllJogs(); jogMode = val; renderModes(); };
+    bar.appendChild(b);
+  });
+}
 
 function sync() { cmd('sync'); }
 function rehome() {
@@ -222,6 +243,25 @@ function renderMotors() {
     b.onclick = () => cmd(`motor ${j+1} ${enabled ? "off" : "on"}`);
     bar.appendChild(b);
   }
+}
+
+// ---- Increments ----
+function renderIncrements() {
+  const bar = document.getElementById("incBar"); bar.innerHTML = "";
+  (config.increments || []).forEach(v => {
+    const b = document.createElement("button");
+    b.className = "btn sm" + (v === selInc ? " on" : "");
+    b.textContent = v + "°";
+    b.onclick = () => { selInc = v; renderIncrements(); };
+    bar.appendChild(b);
+  });
+}
+function addIncrement() {
+  const v = parseFloat(document.getElementById("incCustom").value);
+  if (!isFinite(v) || v <= 0) return;
+  const inc = Array.from(new Set([...(config.increments||[]), v])).sort((a,b)=>a-b);
+  send({ type:"set_increments", values: inc });
+  selInc = v;
 }
 
 
@@ -315,12 +355,14 @@ function renderSeqs() {
   });
 }
 
-function renderConfig() { renderPoses(); renderSeqs(); }
+function renderConfig() { renderIncrements(); renderPoses(); renderSeqs(); }
 
 // ---- init ----
 buildJoints();
 buildLimits();
 renderMotors();
+renderIncrements();
+renderModes();
 connect();
 </script>
 </body>

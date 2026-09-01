@@ -21,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-using json = nlohmann::json
+// using json = nlohmann::json
 
 
 
@@ -30,8 +30,6 @@ void benchmarkKinematics(pinocchio::Data &data, pinocchio::FrameIndex tool_frame
 pinocchio::Model model;
 pinocchio::Data::Matrix6x J(6, model.nv);
 int main() {
-    json j;
-    j.dump();
     pinocchio::urdf::buildModel(PAROL_URDF_PATH, model);
     pinocchio::Data data(model);
     J.resize(6, model.nv);

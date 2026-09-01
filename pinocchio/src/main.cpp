@@ -86,7 +86,7 @@ static bool   g_sync_request = false;     // guarded by g_mtx
 // dead-man's-switch so a lost connection can't leave the arm jogging forever.
 static double  g_jog_vel[DOFs]         = {0};    // deg/s, guarded by g_mtx
 static int64_t g_jog_deadline_ns[DOFs] = {0};    // guarded by g_mtx
-static const int64_t JOG_TIMEOUT_NS = 300'000'000LL; // 300 ms watchdog
+static const int64_t JOG_TIMEOUT_NS = 200'000'000LL; // 200 ms watchdog
 
 // Zeroes all jog velocities/deadlines. Caller must already hold g_mtx.
 static void clearJogLocked() {
@@ -106,7 +106,7 @@ static const char* HELP_TEXT =
     "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
     "  jog <j> <delta>     move one joint by a relative amount (deg)\n"
     "  jogvel <j> <v>      velocity-jog one joint at v deg/s (0 to stop); \n"
-    "                      must be refreshed within 300ms or it auto-stops\n"
+    "                      must be refreshed within 200ms or it auto-stops\n"
     "  home                all joints to 0\n"
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
@@ -356,7 +356,6 @@ int main(int argc, char** argv) {
     struct timespec t_prev = next_tick, t_now;
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     double stats_window_us = 0;
-    bool   was_jogging = false; // owned by the control loop -- detects the jog->hold transition
 
     while (g_running.load()) {
 
@@ -377,7 +376,9 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             if (g_have_new) {
-
+                // A real position command always wins over an in-progress jog.
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) input.target_position[i] = g_target[i];
                 g_have_new = false;
             }
@@ -391,6 +392,8 @@ int main(int argc, char** argv) {
             }
             if (g_stop_request) {
                 // Retarget to the current commanded position -> Ruckig ramps to a stop.
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
                     input.target_position[i] = input.current_position[i];
                     g_target[i]              = input.current_position[i];
@@ -409,6 +412,8 @@ int main(int argc, char** argv) {
                 }
             }
             if (g_rehome_request) {
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
                     input.current_position[i] = 0.0;
                     input.current_velocity[i] = 0.0;
@@ -430,26 +435,21 @@ int main(int argc, char** argv) {
                 if (g_jog_vel[i] != 0.0 && jog_now_ns > g_jog_deadline_ns[i]) g_jog_vel[i] = 0.0;
                 if (g_jog_vel[i] != 0.0) any_jog = true;
             }
-            if (any_jog) {
+            // Once a jog starts we stay in Velocity control -- even after every
+            // g_jog_vel hits 0 -- so releasing the arrow just decelerates to a
+            // stop in place. Snapping back to a Position hold here would freeze
+            // a target at the still-moving joint's position, forcing Ruckig to
+            // plan a fresh position move from nonzero velocity, which overshoots
+            // and corrects backward -- exactly the "bounces back" symptom. We
+            // only leave Velocity control from an explicit position command above.
+            if (any_jog || input.control_interface == ControlInterface::Velocity) {
                 input.control_interface = ControlInterface::Velocity;
                 input.synchronization   = Synchronization::None;
                 for (int i = 0; i < DOFs; i++) {
                     input.target_velocity[i]     = g_jog_vel[i];
                     input.target_acceleration[i] = 0.0;
                 }
-                g_target = input.current_position; // keep the UI's target readout tracking live position
-                was_jogging = true;
-            } else if (was_jogging) {
-                // Last held arrow was released -> settle into a position hold right here.
-                input.control_interface = ControlInterface::Position;
-                input.synchronization   = Synchronization::Time;
-                for (int i = 0; i < DOFs; i++) {
-                    input.target_position[i]     = input.current_position[i];
-                    input.target_velocity[i]     = 0.0;
-                    input.target_acceleration[i] = 0.0;
-                }
-                g_target = input.current_position;
-                was_jogging = false;
+                for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // keep the UI's target readout tracking live position
             }
         }
 
