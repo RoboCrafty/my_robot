@@ -23,14 +23,31 @@
 
 // using json = nlohmann::json
 
+class Kinematics{
+    private:
+    pinocchio::Model model_;
+    pinocchio::Data data_;
+    pinocchio::FrameI
+    
+    public:
+    Kinematics()
+    {
+        pinocchio::urdf::buildModel(PAROL_URDF_PATH, model_);
+        data_ = pinocchio::Data(model_);
+    }
 
+    float getManupulabilityIndex(Eigen::VectorXd q)
+    {
+        pinocchio::computeFrameJacobian(model_, data_, q, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED,J);
+    }
+}
 
 Eigen::VectorXd getAngle();
 void benchmarkKinematics(pinocchio::Data &data, pinocchio::FrameIndex tool_frame);
-pinocchio::Model model;
+
 pinocchio::Data::Matrix6x J(6, model.nv);
 int main() {
-    pinocchio::urdf::buildModel(PAROL_URDF_PATH, model);
+    
     pinocchio::Data data(model);
     J.resize(6, model.nv);
     J.setZero();
@@ -54,16 +71,16 @@ int main() {
     std::cout << "TCP Absolute rotvec in world:\n" << pinocchio::rpy::matrixToRpy(R_home.transpose() * data.oMf[tool_frame].rotation()) << '\n';
 
 
-    // auto r = getAngle();
-    // pinocchio::framesForwardKinematics(model, data, r);
-    // std::cout << "TCP pose in world:\n" << data.oMf[tool_frame].translation() << '\n';
-    // std::cout << "TCP absolute rotvec in world:\n" << pinocchio::rpy::matrixToRpy(R_home.transpose() * data.oMf[tool_frame].rotation()) << '\n';
+    auto r = getAngle();
+    pinocchio::framesForwardKinematics(model, data, r);
+    std::cout << "TCP pose in world:\n" << data.oMf[tool_frame].translation() << '\n';
+    std::cout << "TCP absolute rotvec in world:\n" << pinocchio::rpy::matrixToRpy(R_home.transpose() * data.oMf[tool_frame].rotation()) << '\n';
 
-    // auto r = getAngle();
-    // pinocchio::computeFrameJacobian(model, data, r, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED,J);
-    // std::cout << "Jacobian is: \n" << J << std::endl;
+    auto r = getAngle();
+    pinocchio::computeFrameJacobian(model, data, r, tool_frame, pinocchio::LOCAL_WORLD_ALIGNED,J);
+    std::cout << "Jacobian is: \n" << J << std::endl;
 
-    // benchmarkKinematics(model, data, tool_frame);
+    benchmarkKinematics(model, data, tool_frame);
 }   
 
 
@@ -72,3 +89,4 @@ int main() {
 //     // pinocchio::computeJointJacobian(model, da)
 
 // }
+
