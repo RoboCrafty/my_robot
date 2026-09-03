@@ -150,7 +150,7 @@ class Kinematics{
             }
             // Update q
             q = pinocchio::integrate(model_, q, dq);
-            // q = q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
+            q = q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
         }
         const auto ik_end = std::chrono::steady_clock::now();
         const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(ik_end - ik_start).count();
@@ -199,15 +199,20 @@ int main()
     Eigen::Matrix<double, 6, 1> fk = parolKins.ForwardKinematics(q);
     std::cout << "Starting Pose: \n" << fk << std::endl;
     
+   while (1)
+   {
+        try {
+            auto t = getTarget(parolKins.nq);
+            auto res = parolKins.InverseKinematics_Positional(t, q);
+            std::cout << "computed IK: \n" << res * 180/M_PI << std::endl;
+            // std::cout << "computed IK: \n" << res << std::endl;
+        } catch (const std::runtime_error& error) {
+            std::cerr << "IK failed: " << error.what() << std::endl;
+            return 1;
+        }
+   }
     
-    try {
-        auto t = getTarget(parolKins.nq);
-        auto res = parolKins.InverseKinematics_Positional(t, q);
-        std::cout << "computed IK: \n" << res * 180/M_PI << std::endl;
-    } catch (const std::runtime_error& error) {
-        std::cerr << "IK failed: " << error.what() << std::endl;
-        return 1;
-    }
+    
 
 }
 
