@@ -24,6 +24,7 @@
 #include <cstdio>
 
 #include "protocol.h"   // EspToPiPacket / PiToEspPacket + COBS/CRC framing
+#include "kinematics.hpp" // Pinocchio FK/IK (radians, metres)
 
 #define SERIAL_PORT "/dev/ttyUSB1"
 
@@ -79,6 +80,12 @@ static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
 
+// Cartesian "move" (non-linear): IK a target pose to joint angles, then let the
+// joint-space Ruckig get there. Pose is [x y z rx ry rz] in metres/radians
+// (base frame). Resolved by the control loop, which owns the Kinematics object.
+static double g_move_pose[6]   = {0};   // guarded by g_mtx
+static bool   g_move_request   = false; // guarded by g_mtx
+
 // Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
 // joint under Ruckig's Velocity control interface instead of Position. Each
 // non-zero entry carries a deadline; if the UI stops refreshing it (e.g. the
@@ -111,6 +118,7 @@ static const char* HELP_TEXT =
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
+    "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -136,6 +144,18 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
+    if (tok[0] == "move") {
+        if (tok.size() != 7) return "usage: move x y z rx ry rz (m, rad)";
+        try {
+            double p[6];
+            for (int i = 0; i < 6; i++) p[i] = std::stod(tok[i + 1]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_move_pose[i] = p[i];
+            g_move_request = true;
+            clearJogLocked();
+            return "moving";
+        } catch (const std::exception&) { return "bad number"; }
+    }
     if (tok[0] == "rehome") {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_motor_enable_mask = 0x3f;
@@ -289,6 +309,10 @@ int main(int argc, char** argv) {
     // Serial port can be given as the first CLI arg, else defaults to SERIAL_PORT.
     const char* port = (argc > 1) ? argv[1] : SERIAL_PORT;
 
+    // Kinematics lives entirely on this (control-loop) thread. It is NOT
+    // thread-safe -- it holds mutable Pinocchio Data + Jacobian scratch buffers.
+    Kinematics kin;
+
     // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
     serialib serial;
 
@@ -410,6 +434,31 @@ int main(int argc, char** argv) {
                     input.current_acceleration[i] = 0.0;
                     input.target_position[i]      = rx_packet.actual_position[i];
                     g_target[i]                   = rx_packet.actual_position[i];
+                }
+            }
+            if (g_move_request) {
+                g_move_request = false;
+                // deg -> rad for the IK seed (the whole loop works in degrees).
+                Eigen::VectorXd q_seed(DOFs);
+                for (int i = 0; i < DOFs; i++)
+                    q_seed[i] = input.current_position[i] * M_PI / 180.0;
+
+                Eigen::Matrix<double, 6, 1> pose;
+                for (int i = 0; i < 6; i++) pose[i] = g_move_pose[i];
+                auto ik = kin.InverseKinematics_Positional(Kinematics::poseToSE3(pose), q_seed);
+
+                if (ik.status == 1) {
+                    // rad -> deg back into the joint-space Ruckig target.
+                    input.control_interface = ControlInterface::Position;
+                    input.synchronization   = Synchronization::Time;
+                    for (int i = 0; i < DOFs; i++) {
+                        double deg = ik.q[i] * 180.0 / M_PI;
+                        input.target_position[i] = deg;
+                        g_target[i]              = deg;
+                    }
+                    std::fprintf(stderr, "[move] IK ok in %d iters\n", ik.iters);
+                } else {
+                    std::fprintf(stderr, "[move] IK failed (status %d) -- holding\n", ik.status);
                 }
             }
             if (g_rehome_request) {
