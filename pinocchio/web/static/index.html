@@ -47,6 +47,7 @@
   <h1>Parol6 Control</h1>
   <button class="btn" onclick="sync()">Sync&nbsp;↺</button>
   <button class="btn" onclick="cmd('home')">Home</button>
+  <button class="btn" onclick="cmd('ready')">Ready</button>
   <button class="btn bad" onclick="rehome()">Rehome</button>
   <button class="btn bad" onclick="cmd('stop')">STOP</button>
   <span id="status">connecting…</span>
@@ -88,6 +89,9 @@
     <div class="toolbar" style="margin-top:8px">
       <span class="mut">TCP:</span>
       <span class="act" id="tcpReadout" style="width:auto; letter-spacing:.02em">—</span>
+      <span style="flex:1"></span>
+      <span class="mut">σmin:</span>
+      <span class="act" id="sigReadout" style="width:auto">—</span>
     </div>
   </section>
 
@@ -231,6 +235,12 @@ function onState(m) {
       `RX ${(t[3]*dg).toFixed(1)}  RY ${(t[4]*dg).toFixed(1)}  RZ ${(t[5]*dg).toFixed(1)}`;
   }
   if (m.frame && m.frame !== cartFrame) { cartFrame = m.frame; renderCartFrame(); }
+  // Distance to a singularity. Colour-coded so you can see one coming.
+  if (typeof m.sigma === "number") {
+    const el = document.getElementById("sigReadout");
+    el.textContent = m.sigma.toFixed(4);
+    el.style.color = m.sigma < 0.02 ? "var(--bad)" : m.sigma < 0.05 ? "var(--warn)" : "var(--good)";
+  }
   renderMotors();
 }
 function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }

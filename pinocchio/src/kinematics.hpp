@@ -34,6 +34,10 @@ class Kinematics{
     int     ik_max_iters = 100;
     double  ik_max_step_rad = 0.5;
     double  ik_damping = 1e-4;
+    // Singularity conditioning. sigma_min below sing_eps_ ramps damping in;
+    // both are arm-specific -- watch the reported sigma_min and tune.
+    double  sing_eps_ = 0.02;
+    double  sing_lambda_max_ = 0.05;
 
     // Private Functions
     double computeRobotReachFromModel()
@@ -159,19 +163,52 @@ class Kinematics{
         return e;
     }
 
-    // Damped least-squares resolved rate: joint velocity producing `twist` at the tool.
-    // Returns the manipulability index so the caller can back off near singularities.
-    double resolvedRate(const Eigen::VectorXd& q,
-                        const Eigen::Matrix<double,6,1>& twist,
-                        Eigen::VectorXd& dq_out,
-                        pinocchio::ReferenceFrame rf = pinocchio::LOCAL_WORLD_ALIGNED){
+    struct RrmcResult {
+        double manipulability; // sqrt(det(J J^T))
+        double sigma_min;      // smallest singular value of J -- 0 at a singularity
+        double damping;        // lambda^2 actually applied
+        double track_err;      // fraction of the requested twist NOT achieved, 0..1
+    };
+
+    // Smallest singular value of the tool Jacobian: distance to a singularity.
+    double sigmaMin(const Eigen::VectorXd& q,
+                    pinocchio::ReferenceFrame rf = pinocchio::LOCAL_WORLD_ALIGNED){
         J_.setZero();
         pinocchio::computeFrameJacobian(model_, data_, q, tool_frame_id_, rf, J_);
         JJ_t_.noalias() = J_ * J_.transpose();
-        const double w = std::sqrt(std::max(0.0, JJ_t_.determinant()));
-        JJ_t_.diagonal().array() += ik_damping;
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(JJ_t_, Eigen::EigenvaluesOnly);
+        return std::sqrt(std::max(0.0, es.eigenvalues()(0)));
+    }
+
+    // Damped least-squares resolved rate with Chiaverini-style adaptive damping:
+    // no damping in well-conditioned poses, ramping in smoothly near a singularity
+    // so dq stays bounded instead of blowing up.
+    // track_err is DIRECTIONAL: it only rises for twist components the arm truly
+    // cannot produce, so pure translation still works at a wrist singularity.
+    RrmcResult resolvedRate(const Eigen::VectorXd& q,
+                            const Eigen::Matrix<double,6,1>& twist,
+                            Eigen::VectorXd& dq_out,
+                            pinocchio::ReferenceFrame rf = pinocchio::LOCAL_WORLD_ALIGNED){
+        J_.setZero();
+        pinocchio::computeFrameJacobian(model_, data_, q, tool_frame_id_, rf, J_);
+        JJ_t_.noalias() = J_ * J_.transpose();
+
+        RrmcResult r;
+        r.manipulability = std::sqrt(std::max(0.0, JJ_t_.determinant()));
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(JJ_t_, Eigen::EigenvaluesOnly);
+        r.sigma_min = std::sqrt(std::max(0.0, es.eigenvalues()(0)));
+
+        r.damping = 0.0;
+        if (r.sigma_min < sing_eps_) {
+            const double k = 1.0 - r.sigma_min / sing_eps_;
+            r.damping = sing_lambda_max_ * sing_lambda_max_ * k * k;
+        }
+        JJ_t_.diagonal().array() += (ik_damping + r.damping);
         dq_out.noalias() = J_.transpose() * JJ_t_.ldlt().solve(twist);
-        return w;
+
+        const double tn = twist.norm();
+        r.track_err = (tn > 1e-9) ? ((J_ * dq_out) - twist).norm() / tn : 0.0;
+        return r;
     }
 
     // @param p A 6D vector of pose and orintation

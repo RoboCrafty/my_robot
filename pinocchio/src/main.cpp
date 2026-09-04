@@ -64,7 +64,14 @@ static constexpr double R2D = 180.0 / M_PI;
 
 // Cartesian servo tuning.
 static constexpr double CART_KP    = 2.0;   // pose-error feedback gain (1/s)
-static constexpr double CART_W_MIN = 1e-3;  // manipulability floor for singularity back-off
+// Stop Cartesian motion once this fraction of the requested twist is unachievable.
+// Directional, so a blocked rotation axis doesn't veto achievable translation.
+static constexpr double CART_TRACK_ERR_MAX = 0.30;
+
+// Singularity-free "ready" pose (deg). All-zeros is the kinematic zero, but it
+// puts J4 parallel to J6 (wrist singularity), so Cartesian motion is degenerate
+// there. J5 off zero unfolds the wrist. Tune to taste.
+static const double READY_POSE[6] = {0, 0, 0, 0, -90, 0};
 
 // Which mode fills tx_packet each tick. Every mode still ends at joint pos+vel.
 enum class Mode { Joint, CartVel, CartLin };
@@ -151,6 +158,7 @@ static const char* HELP_TEXT =
     "  jogvel <j> <v>      velocity-jog one joint at v deg/s (0 to stop); \n"
     "                      must be refreshed within 200ms or it auto-stops\n"
     "  home                all joints to 0\n"
+    "  ready               go to the singularity-free ready pose\n"
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
@@ -264,6 +272,14 @@ static std::string handleCommand(const std::string& line) {
         g_rehome_request = true;
         clearJogLocked();
         return "rehoming";
+    }
+
+    if (tok[0] == "ready") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (int i = 0; i < DOFs; i++) g_target[i] = READY_POSE[i];
+        g_have_new = true;
+        clearJogLocked();
+        return "moving to ready pose";
     }
 
     if (tok[0] == "motor") {
@@ -488,6 +504,8 @@ int main(int argc, char** argv) {
     OutputParameter<1> out_s;
     pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
     pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
+    double last_sigma_min = 0.0;   // published to the UI as a singularity gauge
+    bool   sing_warned = false;    // rate-limits the "blocked" message
 
     // Enter Main loop 
     while (g_running.load()) {
@@ -703,18 +721,38 @@ int main(int argc, char** argv) {
                     input.control_interface = ControlInterface::Velocity;
                     input.synchronization   = Synchronization::None;
                     Eigen::VectorXd dq_rad(DOFs);
-                    double w = kin.resolvedRate(q_rad, twist, dq_rad, rf);
-                    double sing = (w < CART_W_MIN) ? std::max(0.0, w / CART_W_MIN) : 1.0; // back off near singularity
-                    Eigen::VectorXd dq_deg = dq_rad * R2D * sing;
-                    // Velocity control ignores max_velocity, so clamp here, preserving direction.
-                    double vscale = 1.0;
-                    for (int i = 0; i < DOFs; i++) {
-                        double a = std::abs(dq_deg[i]);
-                        if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
-                    }
-                    for (int i = 0; i < DOFs; i++) {
-                        input.target_velocity[i]     = dq_deg[i] * vscale;
-                        input.target_acceleration[i] = 0.0;
+                    auto rr = kin.resolvedRate(q_rad, twist, dq_rad, rf);
+                    last_sigma_min = rr.sigma_min;
+
+                    if (rr.track_err > CART_TRACK_ERR_MAX) {
+                        // The arm physically cannot produce this twist (singularity or
+                        // reach limit). Coast to a stop in Velocity control -- snapping to
+                        // a Position hold while still moving causes the bounce-back.
+                        clearCartJogLocked();
+                        mode = Mode::Joint;
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_velocity[i]     = 0.0;
+                            input.target_acceleration[i] = 0.0;
+                        }
+                        if (!sing_warned) {
+                            sing_warned = true;
+                            std::fprintf(stderr,
+                                "[cart] blocked: %.0f%% of requested twist unachievable "
+                                "(sigma_min %.4f) -- stopping\n", rr.track_err * 100.0, rr.sigma_min);
+                        }
+                    } else {
+                        sing_warned = false;
+                        Eigen::VectorXd dq_deg = dq_rad * R2D;
+                        // Velocity control ignores max_velocity, so clamp here, preserving direction.
+                        double vscale = 1.0;
+                        for (int i = 0; i < DOFs; i++) {
+                            double a = std::abs(dq_deg[i]);
+                            if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
+                        }
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_velocity[i]     = dq_deg[i] * vscale;
+                            input.target_acceleration[i] = 0.0;
+                        }
                     }
                     for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // UI target tracks live pose
                 }
@@ -788,12 +826,15 @@ int main(int argc, char** argv) {
                 Eigen::VectorXd q_fb(DOFs);
                 for (int i = 0; i < DOFs; i++) q_fb[i] = rx_packet.actual_position[i] * D2R;
                 Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
-                char sb[768];
+                // Refresh the gauge from feedback while idle; the servo path keeps it live.
+                if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
+                char sb[832];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
                     "\"frame\":\"%s\","
+                    "\"sigma\":%.5f,"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -803,6 +844,7 @@ int main(int argc, char** argv) {
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
                     tcp[0],tcp[1],tcp[2],tcp[3],tcp[4],tcp[5],
                     cart_frame == 1 ? "tool" : "base",
+                    last_sigma_min,
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],
                     jm[0],jm[1],jm[2],jm[3],jm[4],jm[5],
