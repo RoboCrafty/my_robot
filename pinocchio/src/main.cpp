@@ -58,6 +58,17 @@ inline InputParameter<DOFs> input;
 inline OutputParameter<DOFs> output;
 const float K_P = 10.0f;
 
+// Whole controller works in DEGREES; Pinocchio works in RADIANS/METRES.
+static constexpr double D2R = M_PI / 180.0;
+static constexpr double R2D = 180.0 / M_PI;
+
+// Cartesian servo tuning.
+static constexpr double CART_KP    = 2.0;   // pose-error feedback gain (1/s)
+static constexpr double CART_W_MIN = 1e-3;  // manipulability floor for singularity back-off
+
+// Which mode fills tx_packet each tick. Every mode still ends at joint pos+vel.
+enum class Mode { Joint, CartVel, CartLin };
+
 // --- Shared command state between the input REPL and the 500 Hz loop ---
 static std::mutex               g_mtx;
 static std::array<double, DOFs> g_target;          // last commanded targets (deg), guarded by g_mtx
@@ -86,6 +97,25 @@ static bool   g_sync_request = false;     // guarded by g_mtx
 static double g_move_pose[6]   = {0};   // guarded by g_mtx
 static bool   g_move_request   = false; // guarded by g_mtx
 
+// Cartesian jogging + straight-line moves. Frame selects whether the twist axes
+// and relative deltas are the base/world frame or the tool/TCP frame.
+static int    g_cart_frame = 0;                 // 0 = base/world, 1 = tool/TCP; guarded by g_mtx
+static double g_cart_jog_vel[6]         = {0};  // twist [vx vy vz wx wy wz], m/s & rad/s; guarded by g_mtx
+static int64_t g_cart_jog_deadline_ns[6] = {0}; // guarded by g_mtx (same 200ms dead-man as joint jog)
+
+// Straight-line move request (moveL absolute pose OR cartjog relative step).
+// The loop builds the goal SE3 from FK + these params, then runs a jerk-limited
+// scalar path. kind: 1 = absolute pose (m,rad), 2 = relative delta (m,rad).
+static int    g_lin_kind    = 0;      // guarded by g_mtx
+static double g_lin_arg[6]  = {0};    // guarded by g_mtx
+static bool   g_lin_request = false;  // guarded by g_mtx
+
+// Cartesian motion limits: translational (m/s, m/s^2, m/s^3) and rotational
+// (rad/s, rad/s^2, rad/s^3). guarded by g_mtx.
+static double g_cart_vmax  = 0.10, g_cart_amax  = 0.40, g_cart_jmax  = 2.0;
+static double g_cart_wmax  = 0.80, g_cart_awmax = 3.0,  g_cart_jwmax = 15.0;
+
+
 // Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
 // joint under Ruckig's Velocity control interface instead of Position. Each
 // non-zero entry carries a deadline; if the UI stops refreshing it (e.g. the
@@ -96,9 +126,15 @@ static int64_t g_jog_deadline_ns[DOFs] = {0};    // guarded by g_mtx
 static const int64_t JOG_TIMEOUT_NS = 200'000'000LL; // 200 ms watchdog
 
 // Zeroes all jog velocities/deadlines. Caller must already hold g_mtx.
-static void clearJogLocked() {
+static void clearJointJogLocked() {
     for (int i = 0; i < DOFs; i++) { g_jog_vel[i] = 0.0; g_jog_deadline_ns[i] = 0; }
 }
+static void clearCartJogLocked() {
+    for (int i = 0; i < 6; i++) { g_cart_jog_vel[i] = 0.0; g_cart_jog_deadline_ns[i] = 0; }
+}
+// Cancel every jogging source (joint + Cartesian). Used by discrete commands.
+static void clearJogLocked() { clearJointJogLocked(); clearCartJogLocked(); }
+
 
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
 // as the REPL; state out = a compact JSON line for the Python web UI.
@@ -119,6 +155,10 @@ static const char* HELP_TEXT =
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
     "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
+    "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
+    "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
+    "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
+    "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -128,6 +168,13 @@ static const char* HELP_TEXT =
     "  stats               toggle loop and serial statistics\n"
     "  help                show this help\n"
     "  q / quit            exit\n";
+
+// Maps a Cartesian axis token to a twist index: x y z -> 0 1 2, rx ry rz -> 3 4 5.
+static int cartAxis(const std::string& s) {
+    if (s == "x")  return 0; if (s == "y")  return 1; if (s == "z")  return 2;
+    if (s == "rx") return 3; if (s == "ry") return 4; if (s == "rz") return 5;
+    return -1;
+}
 
 // Parse and apply one command line. Returns a short status string. Shared by the
 // stdin REPL and the UDP interface; thread-safe via g_mtx.
@@ -154,6 +201,59 @@ static std::string handleCommand(const std::string& line) {
             g_move_request = true;
             clearJogLocked();
             return "moving";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "movel") {
+        if (tok.size() != 7) return "usage: movel x y z rx ry rz (m, rad)";
+        try {
+            double p[6];
+            for (int i = 0; i < 6; i++) p[i] = std::stod(tok[i + 1]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_lin_arg[i] = p[i];
+            g_lin_kind = 1;               // absolute pose
+            g_lin_request = true;
+            clearJogLocked();
+            return "moving (linear)";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "cartframe") {
+        if (tok.size() != 2 || (tok[1] != "base" && tok[1] != "tool"))
+            return "usage: cartframe base|tool";
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cart_frame = (tok[1] == "tool") ? 1 : 0;
+        return tok[1] == "tool" ? "cart frame: tool" : "cart frame: base";
+    }
+    if (tok[0] == "cartjog") {
+        if (tok.size() != 3) return "usage: cartjog <x|y|z|rx|ry|rz> <delta>";
+        int ax = cartAxis(tok[1]);
+        if (ax < 0) return "axis must be x y z rx ry rz";
+        try {
+            double d = std::stod(tok[2]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_lin_arg[i] = 0.0;
+            g_lin_arg[ax] = d;
+            g_lin_kind = 2;               // relative delta in the selected frame
+            g_lin_request = true;
+            clearJogLocked();
+            return "cartjog ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "cartjogvel") {
+        if (tok.size() != 3) return "usage: cartjogvel <x|y|z|rx|ry|rz> <vel>";
+        int ax = cartAxis(tok[1]);
+        if (ax < 0) return "axis must be x y z rx ry rz";
+        try {
+            double v = std::stod(tok[2]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            clearJointJogLocked();        // Cartesian and joint jogging are mutually exclusive
+            g_cart_jog_vel[ax] = v;
+            if (v != 0.0) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                g_cart_jog_deadline_ns[ax] = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + JOG_TIMEOUT_NS;
+            } else {
+                g_cart_jog_deadline_ns[ax] = 0;
+            }
+            return "cartjogvel ok";
         } catch (const std::exception&) { return "bad number"; }
     }
     if (tok[0] == "rehome") {
@@ -380,7 +480,15 @@ int main(int argc, char** argv) {
     struct timespec t_prev = next_tick, t_now;
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     double stats_window_us = 0;
-    
+
+    // Cartesian state, owned exclusively by this loop.
+    Mode mode = Mode::Joint;
+    Ruckig<1> ruck_s(0.002);            // jerk-limited scalar path parameter s in [0,1]
+    InputParameter<1> in_s;
+    OutputParameter<1> out_s;
+    pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
+    pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
+
     // Enter Main loop 
     while (g_running.load()) {
 
@@ -402,6 +510,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(g_mtx);
             if (g_have_new) {
                 // A real position command always wins over an in-progress jog.
+                mode = Mode::Joint;
                 input.control_interface = ControlInterface::Position;
                 input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) input.target_position[i] = g_target[i];
@@ -417,6 +526,7 @@ int main(int argc, char** argv) {
             }
             if (g_stop_request) {
                 // Retarget to the current commanded position -> Ruckig ramps to a stop.
+                mode = Mode::Joint;
                 input.control_interface = ControlInterface::Position;
                 input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
@@ -428,6 +538,7 @@ int main(int argc, char** argv) {
             if (g_sync_request) {
                 // Adopt motor feedback as the planner state. The ESP re-references
                 // its queue on the 0x80 bit, so this produces no motion.
+                mode = Mode::Joint;
                 for (int i = 0; i < DOFs; i++) {
                     input.current_position[i]     = rx_packet.actual_position[i];
                     input.current_velocity[i]     = 0.0;
@@ -449,6 +560,7 @@ int main(int argc, char** argv) {
 
                 if (ik.status == 1) {
                     // rad -> deg back into the joint-space Ruckig target.
+                    mode = Mode::Joint;
                     input.control_interface = ControlInterface::Position;
                     input.synchronization   = Synchronization::Time;
                     for (int i = 0; i < DOFs; i++) {
@@ -462,6 +574,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (g_rehome_request) {
+                mode = Mode::Joint;
                 input.control_interface = ControlInterface::Position;
                 input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
@@ -493,6 +606,7 @@ int main(int argc, char** argv) {
             // and corrects backward -- exactly the "bounces back" symptom. We
             // only leave Velocity control from an explicit position command above.
             if (any_jog || input.control_interface == ControlInterface::Velocity) {
+                if (any_jog) mode = Mode::Joint;   // an active joint jog wins over Cartesian
                 input.control_interface = ControlInterface::Velocity;
                 input.synchronization   = Synchronization::None;
                 for (int i = 0; i < DOFs; i++) {
@@ -500,6 +614,110 @@ int main(int argc, char** argv) {
                     input.target_acceleration[i] = 0.0;
                 }
                 for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // keep the UI's target readout tracking live position
+            }
+
+            // --- Cartesian: straight-line move setup (moveL / cartjog step) ---
+            if (g_lin_request) {
+                g_lin_request = false;
+                Eigen::VectorXd q_rad(DOFs);
+                for (int i = 0; i < DOFs; i++) q_rad[i] = input.current_position[i] * D2R;
+                pinocchio::SE3 start = kin.fkPose(q_rad);
+                pinocchio::SE3 goal;
+                if (g_lin_kind == 1) {                 // absolute pose (base frame)
+                    Eigen::Matrix<double, 6, 1> p;
+                    for (int i = 0; i < 6; i++) p[i] = g_lin_arg[i];
+                    goal = Kinematics::poseToSE3(p);
+                } else {                               // relative delta in the selected frame
+                    Eigen::Vector3d dt(g_lin_arg[0], g_lin_arg[1], g_lin_arg[2]);
+                    Eigen::Vector3d dr(g_lin_arg[3], g_lin_arg[4], g_lin_arg[5]);
+                    if (g_cart_frame == 1)             // tool: post-multiply (axes = TCP)
+                        goal = start * pinocchio::SE3(pinocchio::exp3(dr), dt);
+                    else                               // base: pre-multiply rotation, add world translation
+                        goal = pinocchio::SE3(pinocchio::exp3(dr) * start.rotation(),
+                                              start.translation() + dt);
+                }
+                double lin, ang; Kinematics::poseDistance(start, goal, lin, ang);
+                if (lin < 1e-9 && ang < 1e-9) {
+                    mode = Mode::Joint;               // already there -- nothing to do
+                } else {
+                    // Map the tighter of the linear/angular Cartesian limits onto s in [0,1].
+                    double vmax = std::min(lin > 1e-9 ? g_cart_vmax / lin : 1e9, ang > 1e-9 ? g_cart_wmax  / ang : 1e9);
+                    double amax = std::min(lin > 1e-9 ? g_cart_amax / lin : 1e9, ang > 1e-9 ? g_cart_awmax / ang : 1e9);
+                    double jmax = std::min(lin > 1e-9 ? g_cart_jmax / lin : 1e9, ang > 1e-9 ? g_cart_jwmax / ang : 1e9);
+                    in_s.max_velocity = {vmax}; in_s.max_acceleration = {amax}; in_s.max_jerk = {jmax};
+                    in_s.current_position = {0.0}; in_s.current_velocity = {0.0}; in_s.current_acceleration = {0.0};
+                    in_s.target_position = {1.0};  in_s.target_velocity = {0.0};  in_s.target_acceleration = {0.0};
+                    lin_start = start; lin_goal = goal;
+                    mode = Mode::CartLin;
+                }
+            }
+
+            // --- Cartesian: velocity-jog watchdog (same 200ms dead-man as joints) ---
+            {
+                struct timespec cnow; clock_gettime(CLOCK_MONOTONIC, &cnow);
+                int64_t cnow_ns = (int64_t)cnow.tv_sec * 1000000000LL + cnow.tv_nsec;
+                bool any_cart = false;
+                for (int i = 0; i < 6; i++) {
+                    if (g_cart_jog_vel[i] != 0.0 && cnow_ns > g_cart_jog_deadline_ns[i]) g_cart_jog_vel[i] = 0.0;
+                    if (g_cart_jog_vel[i] != 0.0) any_cart = true;
+                }
+                if (any_cart) mode = Mode::CartVel;   // a fresh cart jog wins over a finishing lin move
+            }
+
+            // --- Cartesian: resolve twist -> joint velocities (runs last, wins) ---
+            if (mode == Mode::CartVel || mode == Mode::CartLin) {
+                Eigen::VectorXd q_rad(DOFs);
+                for (int i = 0; i < DOFs; i++) q_rad[i] = input.current_position[i] * D2R;
+
+                Eigen::Matrix<double, 6, 1> twist; twist.setZero();
+                pinocchio::ReferenceFrame rf = pinocchio::LOCAL_WORLD_ALIGNED;
+
+                if (mode == Mode::CartVel) {
+                    for (int i = 0; i < 6; i++) twist[i] = g_cart_jog_vel[i];
+                    rf = (g_cart_frame == 1) ? pinocchio::LOCAL : pinocchio::LOCAL_WORLD_ALIGNED;
+                } else {
+                    ruck_s.update(in_s, out_s);
+                    double s    = out_s.new_position[0];
+                    double sdot = out_s.new_velocity[0];
+                    pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
+                    pinocchio::SE3 cur     = kin.fkPose(q_rad);
+                    Eigen::Matrix<double, 6, 1> fb = Kinematics::poseError(cur, desired); // world twist
+                    Eigen::Matrix<double, 6, 1> ff; ff.setZero();
+                    ff.head<3>() = (lin_goal.translation() - lin_start.translation()) * sdot;
+                    Eigen::Vector3d w_local = pinocchio::log3(lin_start.rotation().transpose() * lin_goal.rotation());
+                    ff.tail<3>() = desired.rotation() * w_local * sdot; // body path rate -> world frame
+                    twist = ff + CART_KP * fb;
+                    out_s.pass_to_input(in_s);
+                    if (s >= 1.0 - 1e-9 && fb.head<3>().norm() < 1e-3 && fb.tail<3>().norm() < 1e-2) {
+                        mode = Mode::Joint;           // settled -> hold at the current position
+                        input.control_interface = ControlInterface::Position;
+                        input.synchronization   = Synchronization::Time;
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_position[i] = input.current_position[i];
+                            g_target[i]              = input.current_position[i];
+                        }
+                    }
+                }
+
+                if (mode != Mode::Joint) {
+                    input.control_interface = ControlInterface::Velocity;
+                    input.synchronization   = Synchronization::None;
+                    Eigen::VectorXd dq_rad(DOFs);
+                    double w = kin.resolvedRate(q_rad, twist, dq_rad, rf);
+                    double sing = (w < CART_W_MIN) ? std::max(0.0, w / CART_W_MIN) : 1.0; // back off near singularity
+                    Eigen::VectorXd dq_deg = dq_rad * R2D * sing;
+                    // Velocity control ignores max_velocity, so clamp here, preserving direction.
+                    double vscale = 1.0;
+                    for (int i = 0; i < DOFs; i++) {
+                        double a = std::abs(dq_deg[i]);
+                        if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
+                    }
+                    for (int i = 0; i < DOFs; i++) {
+                        input.target_velocity[i]     = dq_deg[i] * vscale;
+                        input.target_acceleration[i] = 0.0;
+                    }
+                    for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // UI target tracks live pose
+                }
             }
         }
 
@@ -562,14 +780,20 @@ int main(int argc, char** argv) {
             bool have; sockaddr_in cli;
             { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
             if (have) {
-                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask;
+                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame;
                 { std::lock_guard<std::mutex> lk(g_mtx);
                                     for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; }
-                                    enabled_mask = g_motor_enable_mask; }
-                char sb[640];
+                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; }
+                // Live TCP pose: FK of the actual joint feedback (deg -> rad).
+                Eigen::VectorXd q_fb(DOFs);
+                for (int i = 0; i < DOFs; i++) q_fb[i] = rx_packet.actual_position[i] * D2R;
+                Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
+                char sb[768];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                    "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                    "\"frame\":\"%s\","
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -577,6 +801,8 @@ int main(int argc, char** argv) {
                     rx_packet.actual_position[0], rx_packet.actual_position[1], rx_packet.actual_position[2],
                     rx_packet.actual_position[3], rx_packet.actual_position[4], rx_packet.actual_position[5],
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
+                    tcp[0],tcp[1],tcp[2],tcp[3],tcp[4],tcp[5],
+                    cart_frame == 1 ? "tool" : "base",
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],
                     jm[0],jm[1],jm[2],jm[3],jm[4],jm[5],
