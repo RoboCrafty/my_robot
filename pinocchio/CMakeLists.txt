@@ -29,11 +29,15 @@ add_executable(parolController
                 src/main.cpp
                 src/serialib.cpp)
 
-target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(parolController ruckig::ruckig Threads::Threads readline)
+target_include_directories(parolController PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${pinocchio_INCLUDE_DIRS})
+target_link_libraries(parolController ruckig::ruckig Threads::Threads readline
+                      Eigen3::Eigen pinocchio::pinocchio)
+
+target_compile_definitions(parolController PRIVATE
+  PAROL_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/assets/parol6.urdf")
 
 
-add_executable(parolFk src/pinocchio.cpp)
+add_executable(parolFk src/kin-test.cpp)
 target_include_directories(parolFk PRIVATE ${pinocchio_INCLUDE_DIRS})
 target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio nlohmann_json::nlohmann_json)
 
