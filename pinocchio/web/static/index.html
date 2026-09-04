@@ -69,6 +69,28 @@
     <div id="joints"></div>
   </section>
 
+  <!-- Cartesian jog -->
+  <section class="panel span2">
+    <h2>Cartesian</h2>
+    <div class="toolbar">
+      <span class="mut">Frame:</span>
+      <div class="inc" id="cartFrameBar"></div>
+      <span class="mut">Lin step m:</span>
+      <div class="inc" id="cartLinIncBar"></div>
+      <span class="mut">Rot step °:</span>
+      <div class="inc" id="cartAngIncBar"></div>
+      <span class="mut">Hold m/s:</span>
+      <input type="number" id="cartLinSpeed" class="num" value="0.05" step="0.01" min="0.001" onchange="cartLinSpeed=+this.value||0.05" />
+      <span class="mut">°/s:</span>
+      <input type="number" id="cartAngSpeed" class="num" value="15" step="1" min="1" onchange="cartAngSpeed=+this.value||15" />
+    </div>
+    <div id="cartAxes"></div>
+    <div class="toolbar" style="margin-top:8px">
+      <span class="mut">TCP:</span>
+      <span class="act" id="tcpReadout" style="width:auto; letter-spacing:.02em">—</span>
+    </div>
+  </section>
+
   <section class="panel span2">
     <h2>Motor torque</h2>
     <div class="toolbar" id="motorBar"></div>
@@ -125,6 +147,15 @@ let jogMode = 'step';               // 'step' | 'hold' -- explicit toggle, no ta
 const jogTimers = Array(NJ).fill(null); // per-joint setInterval id while an arrow is held
 let curSteps = [];                 // working sequence: [{pose, dwell}]
 const sliderBusy = Array(NJ).fill(0);
+
+// ---- Cartesian jog state (reuses the same 'step'/'hold' jogMode as joints) ----
+const CART_AXES = ['x','y','z','rx','ry','rz'];
+let cartFrame = 'base';            // 'base' | 'tool' -- mirrors controller g_cart_frame
+let cartLinStep = 0.01;             // metres per step click
+let cartAngStep = 5;                // degrees per step click
+let cartLinSpeed = 0.05;            // m/s while a translation arrow is held
+let cartAngSpeed = 15;              // deg/s while a rotation arrow is held
+const cartJogTimers = Array(6).fill(null);
 
 // ---- WebSocket ----
 let ws;
@@ -192,6 +223,14 @@ function onState(m) {
   for (let j = 0; j < NJ; j++) {
     setIfIdle(`v${j}`, m.vmax[j]); setIfIdle(`a${j}`, m.amax[j]); setIfIdle(`k${j}`, m.jmax[j]);
   }
+  // Live TCP pose (FK of actual feedback): metres for X/Y/Z, degrees for RX/RY/RZ.
+  if (Array.isArray(m.tcp)) {
+    const t = m.tcp, dg = 180/Math.PI;
+    document.getElementById("tcpReadout").textContent =
+      `X ${t[0].toFixed(3)}  Y ${t[1].toFixed(3)}  Z ${t[2].toFixed(3)}  ` +
+      `RX ${(t[3]*dg).toFixed(1)}  RY ${(t[4]*dg).toFixed(1)}  RZ ${(t[5]*dg).toFixed(1)}`;
+  }
+  if (m.frame && m.frame !== cartFrame) { cartFrame = m.frame; renderCartFrame(); }
   renderMotors();
 }
 function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
@@ -217,13 +256,85 @@ function stopAllJogs() { for (let j = 0; j < NJ; j++) stopJog(j); }
 window.addEventListener("blur", stopAllJogs);
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllJogs(); });
 
+// ---- Cartesian jog: same 'step'/'hold' semantics as joints, but in task space.
+// Step  -> cartjog <axis> <delta>  (straight-line nudge)
+// Hold  -> cartjogvel <axis> <vel> refreshed under the 200ms watchdog.
+function buildCartesian() {
+  const root = document.getElementById("cartAxes");
+  root.innerHTML = "";
+  CART_AXES.forEach((name, a) => {
+    const unit = a < 3 ? "m" : "°";
+    const r = document.createElement("div"); r.className = "row";
+    r.innerHTML = `
+      <span class="jname">${name.toUpperCase()}</span>
+      <button class="btn sm" data-cartjog="${a}:-1">−</button>
+      <button class="btn sm" data-cartjog="${a}:1">＋</button>
+      <span class="mut">${unit}</span>`;
+    root.appendChild(r);
+    r.querySelectorAll("[data-cartjog]").forEach(btn => {
+      const [ax, dir] = btn.dataset.cartjog.split(":").map(Number);
+      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); if (jogMode === 'hold') startCartJog(ax, dir); });
+      btn.addEventListener("pointerup", () => { if (jogMode === 'hold') stopCartJog(ax); else stepCartJog(ax, dir); });
+      btn.addEventListener("pointerleave", () => { if (jogMode === 'hold') stopCartJog(ax); });
+      btn.addEventListener("pointercancel", () => { if (jogMode === 'hold') stopCartJog(ax); });
+    });
+  });
+}
+function stepCartJog(a, dir) {
+  const d = a < 3 ? cartLinStep : cartAngStep * Math.PI / 180; // rot step is entered in degrees
+  cmd(`cartjog ${CART_AXES[a]} ${(dir * d).toFixed(5)}`);
+}
+function sendCartJogVel(a, v) { cmd(`cartjogvel ${CART_AXES[a]} ${v.toFixed(4)}`); }
+function startCartJog(a, dir) {
+  const v = dir * (a < 3 ? cartLinSpeed : cartAngSpeed * Math.PI / 180);
+  sendCartJogVel(a, v);
+  if (cartJogTimers[a]) clearInterval(cartJogTimers[a]);
+  cartJogTimers[a] = setInterval(() => sendCartJogVel(a, v), 60);
+}
+function stopCartJog(a) {
+  if (cartJogTimers[a]) { clearInterval(cartJogTimers[a]); cartJogTimers[a] = null; }
+  sendCartJogVel(a, 0);
+}
+function stopAllCartJogs() { for (let a = 0; a < 6; a++) stopCartJog(a); }
+window.addEventListener("blur", stopAllCartJogs);
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllCartJogs(); });
+
+function renderCartFrame() {
+  const bar = document.getElementById("cartFrameBar"); bar.innerHTML = "";
+  [['base','Base'], ['tool','Tool']].forEach(([val, label]) => {
+    const b = document.createElement("button");
+    b.className = "btn sm" + (val === cartFrame ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { stopAllCartJogs(); cartFrame = val; renderCartFrame(); cmd(`cartframe ${val}`); };
+    bar.appendChild(b);
+  });
+}
+function renderCartIncs() {
+  const lin = document.getElementById("cartLinIncBar"); lin.innerHTML = "";
+  [0.001, 0.005, 0.01, 0.05].forEach(v => {
+    const b = document.createElement("button");
+    b.className = "btn sm" + (v === cartLinStep ? " on" : "");
+    b.textContent = v;
+    b.onclick = () => { cartLinStep = v; renderCartIncs(); };
+    lin.appendChild(b);
+  });
+  const ang = document.getElementById("cartAngIncBar"); ang.innerHTML = "";
+  [1, 5, 15, 45].forEach(v => {
+    const b = document.createElement("button");
+    b.className = "btn sm" + (v === cartAngStep ? " on" : "");
+    b.textContent = v;
+    b.onclick = () => { cartAngStep = v; renderCartIncs(); };
+    ang.appendChild(b);
+  });
+}
+
 function renderModes() {
   const bar = document.getElementById("modeBar"); bar.innerHTML = "";
   [['step','Step'], ['hold','Hold']].forEach(([val, label]) => {
     const b = document.createElement("button");
     b.className = "btn sm" + (val === jogMode ? " on" : "");
     b.textContent = label;
-    b.onclick = () => { stopAllJogs(); jogMode = val; renderModes(); };
+    b.onclick = () => { stopAllJogs(); stopAllCartJogs(); jogMode = val; renderModes(); };
     bar.appendChild(b);
   });
 }
@@ -360,8 +471,11 @@ function renderConfig() { renderIncrements(); renderPoses(); renderSeqs(); }
 // ---- init ----
 buildJoints();
 buildLimits();
+buildCartesian();
 renderMotors();
 renderIncrements();
+renderCartFrame();
+renderCartIncs();
 renderModes();
 connect();
 </script>
