@@ -31,11 +31,20 @@ class Kinematics{
     pinocchio::Data data_;
     pinocchio::FrameIndex base_frame_id_;
     pinocchio::FrameIndex tool_frame_id_;
-    double max_reach_;
-    double ik_pos_tol = 1e-3;
-    double ik_rot_tol = 1e-2; 
-    int ik_max_iters = 5000;
-    double max_step_rad = 0.5;
+    pinocchio::Data::Matrix6x J_;
+    Eigen::Matrix<double, 6, 6> JJ_t_;
+
+    double  max_reach_;
+    double  ik_pos_tol = 1e-3;
+    double  ik_rot_tol = 1e-2; 
+    int     ik_max_iters = 100;
+    double  ik_max_step_rad = 0.5;
+    double  ik_damping = 1e-4;
+
+    struct IkResult { int status; int iters; Eigen::VectorXd q; };
+    // Status: 1 -> success
+    // Status: 2 -> failed, out of reach
+    // Status: 3 -> failed, could not converge within iteration limit
 
 
     // Private Functions
@@ -75,6 +84,9 @@ class Kinematics{
         data_ = pinocchio::Data(model_);
         nq = model_.nq;
         nv = model_.nv;
+        J_.resize(6, model_.nv);
+        J_.setZero();
+        JJ_t_.setZero();
         base_frame_id_ = model_.getFrameId("base_link");
         tool_frame_id_ = model_.getFrameId("tcp_link");
         // std::cout << "nv is " << nv << std::endl;
@@ -88,13 +100,12 @@ class Kinematics{
         std::cout << "Upper joint limits are: \n " <<  model_.upperPositionLimit * 180/M_PI << std::endl;
     }
 
-    float getManupulabilityIndex(Eigen::VectorXd q)
+    double getManupulabilityIndex(Eigen::VectorXd q)
     {
-        pinocchio::Data::Matrix6x J(6, model_.nv);
-        J.setZero();
-        pinocchio::computeFrameJacobian(model_, data_, q, tool_frame_id_, pinocchio::LOCAL_WORLD_ALIGNED, J);
-        auto JJ_T = J * J.transpose();
-        auto det = JJ_T.determinant();
+        J_.setZero();
+        pinocchio::computeFrameJacobian(model_, data_, q, tool_frame_id_, pinocchio::LOCAL_WORLD_ALIGNED, J_);
+        JJ_t_.noalias() = J_ * J_.transpose();
+        auto det = JJ_t_.determinant();
         auto res = sqrt(std::max(0.0, det));
         return res;
     }
@@ -110,17 +121,19 @@ class Kinematics{
     // @param p A 6D vector of pose and orintation
     // @return A 6D vector of joint angles
     // @note Throws error if not reachable
-    Eigen::VectorXd InverseKinematics_Positional(const pinocchio::SE3& target_oMF, const Eigen::VectorXd& q_init){
+    IkResult InverseKinematics_Positional(const pinocchio::SE3& target_oMF, const Eigen::VectorXd& q_init){
+        
+        IkResult result;
+
         const auto ik_start = std::chrono::steady_clock::now();
         if(target_oMF.translation().norm() > max_reach_){
-            throw std::runtime_error("Target is outside the robot's maximum reach");
+            std::cout << "Target is outside the robot's maximum reach" << std::endl;
+            result.status = 2;
+            return result;
         }
         
         Eigen::VectorXd q = q_init;
-        pinocchio::Data::Matrix6x J(6, model_.nv);
-        Eigen::Matrix<double, 6, 6> JJ_t;
-
-        const double damping = 1e-4;
+        Eigen::VectorXd q_next(model_.nq);
         
         for(int i = 0; i < ik_max_iters; i++){
             // Compute current pose 
@@ -134,39 +147,60 @@ class Kinematics{
                 const auto ik_end = std::chrono::steady_clock::now();
                 const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(ik_end - ik_start).count();
                 const double elapsed_ms = std::chrono::duration<double, std::milli>(ik_end - ik_start).count();
-                std::cout << "IK converged in " << i << " iterations!" << std::endl;
-                std::cout << "IK time: " << elapsed_us << " us (" << elapsed_ms << " ms)\n";
-                return q;
+                result.q = q;
+                result.status = 1;
+                result.iters = i;
+                // std::cout << "IK converged in " << i << " iterations!" << std::endl;
+                // std::cout << "IK time: " << elapsed_us << " us (" << elapsed_ms << " ms)\n";
+                return result;
             }
-            // Compute Jacobia
-            J.setZero();
-            pinocchio::getFrameJacobian(model_, data_, tool_frame_id_, pinocchio::LOCAL, J);
+            // Compute Jacobian
+            J_.setZero();
+            pinocchio::getFrameJacobian(model_, data_, tool_frame_id_, pinocchio::LOCAL, J_);
             // Computed Damped Psuedo Inverse Jacobian
-            JJ_t = J * J.transpose();
-            JJ_t.diagonal().array() += damping;  
-            Eigen::VectorXd dq = J.transpose() * JJ_t.ldlt().solve(err.toVector());
-            if (dq.norm() > max_step_rad) {
-                dq = dq * (max_step_rad / dq.norm());
+            JJ_t_.noalias() = J_ * J_.transpose();
+            JJ_t_.diagonal().array() += ik_damping;  
+            Eigen::VectorXd dq = J_.transpose() * JJ_t_.ldlt().solve(err.toVector());
+            if (dq.norm() > ik_max_step_rad) {
+                dq = dq * (ik_max_step_rad / dq.norm());
             }
             // Update q
-            q = pinocchio::integrate(model_, q, dq);
+            pinocchio::integrate(model_, q, dq, q_next);
+            q.swap(q_next);
             q = q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
         }
         const auto ik_end = std::chrono::steady_clock::now();
         const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(ik_end - ik_start).count();
         const double elapsed_ms = std::chrono::duration<double, std::milli>(ik_end - ik_start).count();
-        std::cout << "IK time: " << elapsed_us << " us (" << elapsed_ms << " ms)\n";
-        throw std::runtime_error(
-            "Inverse kinematics could not converge in " +
-            std::to_string(ik_max_iters) + " iterations");
+        // std::cout << "IK time: " << elapsed_us << " us (" << elapsed_ms << " ms)\n";
+        // throw std::runtime_error(
+        //     "Inverse kinematics could not converge in " +
+        //     std::to_string(ik_max_iters) + " iterations");
+        result.iters = ik_max_iters;
+        result.status = 3;
+        return result;
     }
 
-    void InverseKinematics_RRMC(){
+    void InverseKinematics_RRMC(const pinocchio::SE3& target_oMF){
 
+    }
+    void moveL(){}
+    void moveL_delta(){}
+    void speedL(){}
+    void speedJ(){}
+    void moveJ(){}
+    void moveJ_delta(){}
+
+
+    bool isPoseReachable(const pinocchio::SE3& target_oMF){
+        Eigen::VectorXd q(6); q << 0,0,0,0,0,0;
+        auto res = this->InverseKinematics_Positional(target_oMF, q);
+        if(res.status == 1) return true;
+        else if(res.status == 2 || res.status == 3) return false;
     }
 
     // Getters
-    pinocchio::Model get_model(){
+    const pinocchio::Model& get_model(){
         return model_;
     }
 
@@ -201,15 +235,21 @@ int main()
     
    while (1)
    {
-        try {
-            auto t = getTarget(parolKins.nq);
-            auto res = parolKins.InverseKinematics_Positional(t, q);
-            std::cout << "computed IK: \n" << res * 180/M_PI << std::endl;
-            // std::cout << "computed IK: \n" << res << std::endl;
-        } catch (const std::runtime_error& error) {
-            std::cerr << "IK failed: " << error.what() << std::endl;
-            return 1;
+        // auto t = getTarget(parolKins.nq);
+        // std::cout << "Reachable = " << parolKins.isPoseReachable(t) << std::endl;
+        auto t = getTarget(parolKins.nq);
+        auto res = parolKins.InverseKinematics_Positional(t, q);
+
+        if(res.ok == true){
+            std::cout << "computed IK: \n" << res.q * 180/M_PI << std::endl;
         }
+        else if(res.ok == false){
+
+        }
+        
+        // std::cout << "computed IK: \n" << res << std::endl;
+
+        return 1;
    }
     
     

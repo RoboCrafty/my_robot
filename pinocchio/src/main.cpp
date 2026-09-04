@@ -356,7 +356,8 @@ int main(int argc, char** argv) {
     struct timespec t_prev = next_tick, t_now;
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     double stats_window_us = 0;
-
+    
+    // Enter Main loop 
     while (g_running.load()) {
 
         // Measure elapsed time to calculate the loop rate once per second.
