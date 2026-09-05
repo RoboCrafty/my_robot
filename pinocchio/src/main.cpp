@@ -30,6 +30,8 @@
 #include <foxglove/websocket.hpp>
 #include <foxglove/messages.hpp>
 #include <foxglove/foxglove.hpp>
+#include <foxglove/mcap.hpp>
+#include <optional>
 
 #define SERIAL_PORT "/dev/ttyUSB1"
 
@@ -133,6 +135,13 @@ static double g_cart_wmax  = 0.80, g_cart_awmax = 3.0,  g_cart_jwmax = 15.0;
 // only trips very close to a true singularity. Live-tunable: 'trackerr <v>'.
 static double g_cart_track_err_max = 0.10;  // guarded by g_mtx
 
+// Manipulability radius where commanded Cartesian speed starts ramping down
+// (never below the 0.15 floor -- trackerr is the true hard stop). Wider than
+// kinematics.hpp's internal damping radius, so braking starts before the DLS
+// solve needs heavy damping -- less speed to fight means less cross-axis
+// coupling leaking into the other axes near a singularity/reach limit.
+static double g_cart_speed_scale_eps = 0.08;  // guarded by g_mtx
+
 
 // Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
 // joint under Ruckig's Velocity control interface instead of Position. Each
@@ -152,6 +161,12 @@ static void clearCartJogLocked() {
 }
 // Cancel every jogging source (joint + Cartesian). Used by discrete commands.
 static void clearJogLocked() { clearJointJogLocked(); clearCartJogLocked(); }
+
+// MCAP recording. A writer is just another sink on the default Context, same
+// as the WebSocketServer -- once created, every channel's .log() call (from
+// the foxglove thread) reaches it automatically, no per-channel wiring needed.
+static std::mutex                          g_mcap_mtx;
+static std::optional<foxglove::McapWriter> g_mcap_writer; // guarded by g_mcap_mtx
 
 // --- Foxglove telemetry: fixed-size ring buffer, control loop -> publisher thread ---
 // The control loop only ever does a lock + POD copy here (no allocation, no
@@ -210,6 +225,8 @@ static const char* HELP_TEXT =
     "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
     "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
     "  trackerr <v>        Cartesian block threshold, fraction 0..1 (default 0.1)\n"
+    "  record <file.mcap>  start recording /joint_states + /fk_pose to an MCAP file\n"
+    "  record stop         stop recording and close the file\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -326,6 +343,25 @@ static std::string handleCommand(const std::string& line) {
             g_cart_track_err_max = v;
             return "trackerr updated";
         } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "record") {
+        if (tok.size() == 2 && tok[1] == "stop") {
+            std::lock_guard<std::mutex> lk(g_mcap_mtx);
+            if (!g_mcap_writer) return "not recording";
+            g_mcap_writer->close();
+            g_mcap_writer.reset();
+            return "recording stopped";
+        }
+        if (tok.size() != 2) return "usage: record <file.mcap> | record stop";
+        std::lock_guard<std::mutex> lk(g_mcap_mtx);
+        if (g_mcap_writer) return "already recording -- 'record stop' first";
+        foxglove::McapWriterOptions opts;
+        opts.path = tok[1];
+        auto w = foxglove::McapWriter::create(opts);
+        if (!w) return "failed to open MCAP file: " + tok[1];
+        g_mcap_writer = std::move(*w);
+        return "recording to " + tok[1];
     }
 
     if (tok[0] == "ready") {
@@ -614,6 +650,7 @@ int main(int argc, char** argv) {
     OutputParameter<1> out_s;
     pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
     pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
+    double lin_vmax_nominal = 0.0;  // unscaled path speed limit, set at path start
     double last_sigma_min = 0.0;   // published to the UI as a singularity gauge
     bool   sing_warned = false;    // rate-limits the "blocked" message
 
@@ -775,7 +812,7 @@ int main(int argc, char** argv) {
                     in_s.max_velocity = {vmax}; in_s.max_acceleration = {amax}; in_s.max_jerk = {jmax};
                     in_s.current_position = {0.0}; in_s.current_velocity = {0.0}; in_s.current_acceleration = {0.0};
                     in_s.target_position = {1.0};  in_s.target_velocity = {0.0};  in_s.target_acceleration = {0.0};
-                    lin_start = start; lin_goal = goal;
+                    lin_start = start; lin_goal = goal; lin_vmax_nominal = vmax;
                     mode = Mode::CartLin;
                 }
             }
@@ -803,7 +840,21 @@ int main(int argc, char** argv) {
                 if (mode == Mode::CartVel) {
                     for (int i = 0; i < 6; i++) twist[i] = g_cart_jog_vel[i];
                     rf = (g_cart_frame == 1) ? pinocchio::LOCAL : pinocchio::LOCAL_WORLD_ALIGNED;
+                    // Brake the jog itself as sigma_min drops, so the DLS solve is never
+                    // asked to fight a full-speed twist right at the boundary -- that fight
+                    // is what leaks motion into the other axes even with damping.
+                    double sig0 = kin.sigmaMin(q_rad, rf);
+                    if (sig0 < g_cart_speed_scale_eps)
+                        twist *= std::max(0.15, sig0 / g_cart_speed_scale_eps);
                 } else {
+                    // Same braking, applied to the path's own speed limit (not the twist
+                    // after the fact) so `s` never marches ahead of what's achievable --
+                    // that mismatch would just show up later as feedback-driven lag.
+                    double sig0 = kin.sigmaMin(q_rad, rf);
+                    double vscale = (sig0 < g_cart_speed_scale_eps)
+                        ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
+                    in_s.max_velocity = {lin_vmax_nominal * vscale};
+
                     ruck_s.update(in_s, out_s);
                     double s    = out_s.new_position[0];
                     double sdot = out_s.new_velocity[0];
@@ -829,7 +880,14 @@ int main(int argc, char** argv) {
 
                 if (mode != Mode::Joint) {
                     input.control_interface = ControlInterface::Velocity;
-                    input.synchronization   = Synchronization::None;
+                    // Time-sync forces all 6 joints to reach their (constantly updating)
+                    // velocity target together, preserving the ratio resolvedRate solved
+                    // for. Synchronization::None let each joint ramp independently under
+                    // its own accel/jerk limit -- since the Cartesian target keeps moving
+                    // every 2ms tick, joints never truly settle, and independent ramps
+                    // transiently distort the velocity ratio -> leaks into other axes.
+                    // This is the real mechanism behind the drift; no feedback/PID needed.
+                    input.synchronization   = Synchronization::Time;
                     Eigen::VectorXd dq_rad(DOFs);
                     auto rr = kin.resolvedRate(q_rad, twist, dq_rad, rf);
                     last_sigma_min = rr.sigma_min;
@@ -988,6 +1046,8 @@ int main(int argc, char** argv) {
     if (udp.joinable())  udp.join();     // exits within the recv timeout
     if (fg.joinable())   fg.join();      // exits within its 200ms condvar wait
     if (repl.joinable()) repl.detach();  // stdin getline can't be unblocked; let it go
+    { std::lock_guard<std::mutex> lk(g_mcap_mtx);
+      if (g_mcap_writer) { g_mcap_writer->close(); g_mcap_writer.reset(); } }
     serial.closeDevice();
     return 0;
 }
