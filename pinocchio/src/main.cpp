@@ -11,6 +11,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,6 +26,10 @@
 
 #include "protocol.h"   // EspToPiPacket / PiToEspPacket + COBS/CRC framing
 #include "kinematics.hpp" // Pinocchio FK/IK (radians, metres)
+
+#include <foxglove/websocket.hpp>
+#include <foxglove/messages.hpp>
+#include <foxglove/foxglove.hpp>
 
 #define SERIAL_PORT "/dev/ttyUSB1"
 
@@ -147,6 +152,37 @@ static void clearCartJogLocked() {
 }
 // Cancel every jogging source (joint + Cartesian). Used by discrete commands.
 static void clearJogLocked() { clearJointJogLocked(); clearCartJogLocked(); }
+
+// --- Foxglove telemetry: fixed-size ring buffer, control loop -> publisher thread ---
+// The control loop only ever does a lock + POD copy here (no allocation, no
+// Pinocchio call) so the extra Foxglove work (FK, encode, WebSocket I/O) can
+// never delay the 500Hz serial tick. Overwrites the oldest sample if the
+// publisher thread falls behind -- dropping frames is fine for a debug stream.
+struct TelemetrySample { uint64_t t_ns; float q_deg[DOFs]; };
+static constexpr size_t       FG_QUEUE_CAP = 256;
+static std::mutex             g_fg_mtx;
+static std::condition_variable g_fg_cv;
+static std::array<TelemetrySample, FG_QUEUE_CAP> g_fg_ring;
+static size_t g_fg_head = 0, g_fg_count = 0; // guarded by g_fg_mtx
+
+static void pushTelemetry(uint64_t t_ns, const float* q_deg) {
+    std::lock_guard<std::mutex> lk(g_fg_mtx);
+    size_t idx = (g_fg_head + g_fg_count) % FG_QUEUE_CAP;
+    if (g_fg_count == FG_QUEUE_CAP) g_fg_head = (g_fg_head + 1) % FG_QUEUE_CAP;
+    else g_fg_count++;
+    g_fg_ring[idx].t_ns = t_ns;
+    for (int i = 0; i < DOFs; i++) g_fg_ring[idx].q_deg[i] = q_deg[i];
+    g_fg_cv.notify_one();
+}
+
+static bool popTelemetry(TelemetrySample& out) {
+    std::lock_guard<std::mutex> lk(g_fg_mtx);
+    if (g_fg_count == 0) return false;
+    out = g_fg_ring[g_fg_head];
+    g_fg_head = (g_fg_head + 1) % FG_QUEUE_CAP;
+    g_fg_count--;
+    return true;
+}
 
 
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
@@ -439,6 +475,60 @@ static void udpThread(int udp_port) {
     close(g_udp_fd); g_udp_fd = -1;
 }
 
+// Foxglove publisher (separate thread). Owns its OWN Kinematics instance --
+// never touches the control loop's `kin` -- so FK compute and WebSocket I/O
+// can never add latency to the 500Hz serial tick. Publishes:
+//   /joint_states -- actual joint positions, as reported by the ESP32
+//   /fk_pose      -- forward kinematics of those actual positions
+static void foxgloveThread(uint16_t fg_port) {
+    Kinematics kin_fg;
+    static const char* JOINT_NAMES[DOFs] = {"J1", "J2", "J3", "J4", "J5", "J6"};
+
+    foxglove::setLogLevel(foxglove::LogLevel::Warn);
+
+    foxglove::WebSocketServerOptions opts;
+    opts.host = "0.0.0.0"; // LAN-reachable; unauthenticated debug stream, trusted networks only
+    opts.port = fg_port;
+    auto server = foxglove::WebSocketServer::create(std::move(opts));
+    if (!server) { std::cerr << "Foxglove: failed to start WebSocket server\n"; return; }
+    std::cout << "Foxglove WebSocket server on ws://0.0.0.0:" << server->port() << "\n";
+
+    auto jointsChan = foxglove::messages::JointStatesChannel::create("/joint_states");
+    auto poseChan   = foxglove::messages::PoseInFrameChannel::create("/fk_pose");
+    if (!jointsChan || !poseChan) { std::cerr << "Foxglove: failed to create channels\n"; return; }
+
+    while (g_running.load()) {
+        TelemetrySample s;
+        {
+            std::unique_lock<std::mutex> lk(g_fg_mtx);
+            g_fg_cv.wait_for(lk, std::chrono::milliseconds(200), [] { return g_fg_count > 0; });
+        }
+        while (popTelemetry(s)) {
+            foxglove::messages::JointStates js;
+            for (int i = 0; i < DOFs; i++) {
+                foxglove::messages::JointState j;
+                j.name = JOINT_NAMES[i];
+                j.position = s.q_deg[i] * D2R;
+                js.joints.push_back(std::move(j));
+            }
+            jointsChan->log(js, s.t_ns);
+
+            Eigen::VectorXd q_rad(DOFs);
+            for (int i = 0; i < DOFs; i++) q_rad[i] = s.q_deg[i] * D2R;
+            pinocchio::SE3 tcp = kin_fg.fkPose(q_rad);
+            Eigen::Quaterniond quat(tcp.rotation());
+
+            foxglove::messages::PoseInFrame pose;
+            pose.frame_id = "base_link";
+            foxglove::messages::Pose p;
+            p.position    = foxglove::messages::Vector3{tcp.translation().x(), tcp.translation().y(), tcp.translation().z()};
+            p.orientation = foxglove::messages::Quaternion{quat.x(), quat.y(), quat.z(), quat.w()};
+            pose.pose = p;
+            poseChan->log(pose, s.t_ns);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     // Serial port can be given as the first CLI arg, else defaults to SERIAL_PORT.
     const char* port = (argc > 1) ? argv[1] : SERIAL_PORT;
@@ -500,8 +590,10 @@ int main(int argc, char** argv) {
     // Seed the shared targets with the current position, then start REPL + UDP.
     for (int i = 0; i < DOFs; i++) g_target[i] = input.target_position[i];
     int udp_port = (argc > 2) ? std::atoi(argv[2]) : 5005;
+    int fg_port  = (argc > 3) ? std::atoi(argv[3]) : 8765;
     std::thread repl(inputThread);
     std::thread udp(udpThread, udp_port);
+    std::thread fg(foxgloveThread, (uint16_t)fg_port);
 
     std::cout << "\nStreaming at 500 Hz. Enter commands below (or use the web UI).\n";
 
@@ -813,6 +905,14 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Hand the freshest actual position to the Foxglove publisher thread.
+        // Just a lock + POD copy -- FK/encode/WebSocket I/O happen off-thread.
+        {
+            struct timespec rt; clock_gettime(CLOCK_REALTIME, &rt);
+            pushTelemetry((uint64_t)rt.tv_sec * 1000000000ULL + (uint64_t)rt.tv_nsec,
+                          rx_packet.actual_position);
+        }
+
         // 4. Optional live telemetry at ~5 Hz. Toggle with 'mon'.
         static int telem = 0;
         if (g_monitor.load() && (++telem % 100 == 0)) {
@@ -886,6 +986,7 @@ int main(int argc, char** argv) {
 
     g_running = false;
     if (udp.joinable())  udp.join();     // exits within the recv timeout
+    if (fg.joinable())   fg.join();      // exits within its 200ms condvar wait
     if (repl.joinable()) repl.detach();  // stdin getline can't be unblocked; let it go
     serial.closeDevice();
     return 0;
