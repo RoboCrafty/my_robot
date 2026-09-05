@@ -2,5 +2,6 @@
     "github.copilot.chat.codeGeneration.useInstructionFiles": true,
     "urdf-visualizer.packages": {
         "franka_description": "/Users/fudayl/git/my_robot/.venv/lib/python3.12/site-packages/rtbdata/xacro/franka_description"
-    }
+    },
+    "cmake.sourceDirectory": "/Users/fudayl/git/my_robot/pinocchio"
 }   

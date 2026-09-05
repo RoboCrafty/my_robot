@@ -7,13 +7,18 @@
                 "${workspaceFolder}/pinocchioIncludes/**",
                 "/opt/homebrew/opt/pinocchio/include",
                 "/opt/homebrew/opt/boost/include",
-                "/opt/homebrew/Cellar/urdfdom_headers/3.0.1/include"
+                "/opt/homebrew/Cellar/urdfdom_headers/3.0.1/include",
+                "/usr/include/eigen3/**",
+                "/usr/local/include/**"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang",
             "cStandard": "c17",
             "cppStandard": "c++14",
-            "intelliSenseMode": "macos-clang-arm64"
+            "intelliSenseMode": "macos-clang-arm64",
+            "compileCommands": [
+                "${workspaceFolder}/pinocchio/build/compile_commands.json"
+            ]
         }
     ],
     "version": 4
