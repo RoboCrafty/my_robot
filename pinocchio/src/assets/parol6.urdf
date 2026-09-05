@@ -397,12 +397,12 @@
       velocity="3" />
   </joint>
 
-<!-- 0.034 is from j5 till face of that link, so 0.034+0.05=0.084 -->
+<!-- 0.034 is from j5 till face of that link, so 0.034+0.05=0.084 or with paralell gripper 0.034 + 0.120 = 0.154  + -->
   <link name="tcp_link"/>
   <joint name="tool_to_tcp" type="fixed">
     <parent link="tool"/>
     <child link="tcp_link"/>
-    <origin rpy="0 0 -1.5707963267949" xyz="0 0 0.084"/> 
+    <origin rpy="0 0 -1.5707963267949" xyz="0 0 0.154"/> 
   </joint>
   
 
