@@ -11,6 +11,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -24,6 +25,13 @@
 #include <cstdio>
 
 #include "protocol.h"   // EspToPiPacket / PiToEspPacket + COBS/CRC framing
+#include "kinematics.hpp" // Pinocchio FK/IK (radians, metres)
+
+#include <foxglove/websocket.hpp>
+#include <foxglove/messages.hpp>
+#include <foxglove/foxglove.hpp>
+#include <foxglove/mcap.hpp>
+#include <optional>
 
 #define SERIAL_PORT "/dev/ttyUSB1"
 
@@ -57,6 +65,26 @@ inline InputParameter<DOFs> input;
 inline OutputParameter<DOFs> output;
 const float K_P = 10.0f;
 
+// Whole controller works in DEGREES; Pinocchio works in RADIANS/METRES.
+static constexpr double D2R = M_PI / 180.0;
+static constexpr double R2D = 180.0 / M_PI;
+
+static constexpr double LOOP_DT = 0.002;           // 500 Hz control period
+
+// A linear move solves IK at every interpolation point, so each tick stands on
+// its own and nothing accumulates. `s` is already jerk-limited and mapped onto
+// the per-joint limits, so the result is fed to the ESP directly rather than
+// through the joint-level Ruckig -- re-planning toward a one-tick-ahead target
+// every cycle is a degenerate problem that produces stalls and reversals.
+
+// Singularity-free "ready" pose (deg). All-zeros is the kinematic zero, but it
+// puts J4 parallel to J6 (wrist singularity), so Cartesian motion is degenerate
+// there. J5 off zero unfolds the wrist. Tune to taste.
+static const double READY_POSE[6] = {0, 0, 0, 0, 45, 0};
+
+// Which mode fills tx_packet each tick. Every mode still ends at joint pos+vel.
+enum class Mode { Joint, CartVel, CartLin };
+
 // --- Shared command state between the input REPL and the 500 Hz loop ---
 static std::mutex               g_mtx;
 static std::array<double, DOFs> g_target;          // last commanded targets (deg), guarded by g_mtx
@@ -79,6 +107,101 @@ static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
 
+// Cartesian "move" (non-linear): IK a target pose to joint angles, then let the
+// joint-space Ruckig get there. Pose is [x y z rx ry rz] in metres/radians
+// (base frame). Resolved by the control loop, which owns the Kinematics object.
+static double g_move_pose[6]   = {0};   // guarded by g_mtx
+static bool   g_move_request   = false; // guarded by g_mtx
+
+// Cartesian jogging + straight-line moves. Frame selects whether the twist axes
+// and relative deltas are the base/world frame or the tool/TCP frame.
+static int    g_cart_frame = 0;                 // 0 = base/world, 1 = tool/TCP; guarded by g_mtx
+static double g_cart_jog_vel[6]         = {0};  // twist [vx vy vz wx wy wz], m/s & rad/s; guarded by g_mtx
+static int64_t g_cart_jog_deadline_ns[6] = {0}; // guarded by g_mtx (same 200ms dead-man as joint jog)
+
+// Straight-line move request (moveL absolute pose OR cartjog relative step).
+// The loop builds the goal SE3 from FK + these params, then runs a jerk-limited
+// scalar path. kind: 1 = absolute pose (m,rad), 2 = relative delta (m,rad).
+static int    g_lin_kind    = 0;      // guarded by g_mtx
+static double g_lin_arg[6]  = {0};    // guarded by g_mtx
+static bool   g_lin_request = false;  // guarded by g_mtx
+
+// Cartesian motion limits: translational (m/s, m/s^2, m/s^3) and rotational
+// (rad/s, rad/s^2, rad/s^3). guarded by g_mtx.
+static double g_cart_vmax  = 0.10, g_cart_amax  = 0.40, g_cart_jmax  = 2.0;
+static double g_cart_wmax  = 0.80, g_cart_awmax = 3.0,  g_cart_jwmax = 15.0;
+
+// Stop Cartesian motion once this FRACTION (0..1, NOT a distance) of the
+// requested twist is unachievable -- directional, so one blocked rotation axis
+// doesn't veto achievable translation. 0.30 = tolerate up to 30% mismatch;
+// only trips very close to a true singularity. Live-tunable: 'trackerr <v>'.
+static double g_cart_track_err_max = 0.10;  // guarded by g_mtx
+
+// Manipulability radius where commanded Cartesian speed starts ramping down
+// (never below the 0.15 floor -- trackerr is the true hard stop). Wider than
+// kinematics.hpp's internal damping radius, so braking starts before the DLS
+// solve needs heavy damping -- less speed to fight means less cross-axis
+// coupling leaking into the other axes near a singularity/reach limit.
+static double g_cart_speed_scale_eps = 0.08;  // guarded by g_mtx
+
+
+// Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
+// joint under Ruckig's Velocity control interface instead of Position. Each
+// non-zero entry carries a deadline; if the UI stops refreshing it (e.g. the
+// browser tab dies while a button is "held"), the loop zeroes it -- a
+// dead-man's-switch so a lost connection can't leave the arm jogging forever.
+static double  g_jog_vel[DOFs]         = {0};    // deg/s, guarded by g_mtx
+static int64_t g_jog_deadline_ns[DOFs] = {0};    // guarded by g_mtx
+static const int64_t JOG_TIMEOUT_NS = 200'000'000LL; // 200 ms watchdog
+
+// Zeroes all jog velocities/deadlines. Caller must already hold g_mtx.
+static void clearJointJogLocked() {
+    for (int i = 0; i < DOFs; i++) { g_jog_vel[i] = 0.0; g_jog_deadline_ns[i] = 0; }
+}
+static void clearCartJogLocked() {
+    for (int i = 0; i < 6; i++) { g_cart_jog_vel[i] = 0.0; g_cart_jog_deadline_ns[i] = 0; }
+}
+// Cancel every jogging source (joint + Cartesian). Used by discrete commands.
+static void clearJogLocked() { clearJointJogLocked(); clearCartJogLocked(); }
+
+// MCAP recording. A writer is just another sink on the default Context, same
+// as the WebSocketServer -- once created, every channel's .log() call (from
+// the foxglove thread) reaches it automatically, no per-channel wiring needed.
+static std::mutex                          g_mcap_mtx;
+static std::optional<foxglove::McapWriter> g_mcap_writer; // guarded by g_mcap_mtx
+
+// --- Foxglove telemetry: fixed-size ring buffer, control loop -> publisher thread ---
+// The control loop only ever does a lock + POD copy here (no allocation, no
+// Pinocchio call) so the extra Foxglove work (FK, encode, WebSocket I/O) can
+// never delay the 500Hz serial tick. Overwrites the oldest sample if the
+// publisher thread falls behind -- dropping frames is fine for a debug stream.
+struct TelemetrySample { uint64_t t_ns; float q_deg[DOFs]; };
+static constexpr size_t       FG_QUEUE_CAP = 256;
+static std::mutex             g_fg_mtx;
+static std::condition_variable g_fg_cv;
+static std::array<TelemetrySample, FG_QUEUE_CAP> g_fg_ring;
+static size_t g_fg_head = 0, g_fg_count = 0; // guarded by g_fg_mtx
+
+static void pushTelemetry(uint64_t t_ns, const float* q_deg) {
+    std::lock_guard<std::mutex> lk(g_fg_mtx);
+    size_t idx = (g_fg_head + g_fg_count) % FG_QUEUE_CAP;
+    if (g_fg_count == FG_QUEUE_CAP) g_fg_head = (g_fg_head + 1) % FG_QUEUE_CAP;
+    else g_fg_count++;
+    g_fg_ring[idx].t_ns = t_ns;
+    for (int i = 0; i < DOFs; i++) g_fg_ring[idx].q_deg[i] = q_deg[i];
+    g_fg_cv.notify_one();
+}
+
+static bool popTelemetry(TelemetrySample& out) {
+    std::lock_guard<std::mutex> lk(g_fg_mtx);
+    if (g_fg_count == 0) return false;
+    out = g_fg_ring[g_fg_head];
+    g_fg_head = (g_fg_head + 1) % FG_QUEUE_CAP;
+    g_fg_count--;
+    return true;
+}
+
+
 // UDP command/telemetry socket (localhost). Commands in = the same text grammar
 // as the REPL; state out = a compact JSON line for the Python web UI.
 static int         g_udp_fd = -1;
@@ -91,10 +214,24 @@ static const char* HELP_TEXT =
     "  a1 a2 a3 a4 a5 a6   set all six joint targets (deg)\n"
     "  <j> <angle>         move one joint (j = 1..6), e.g.  6 90\n"
     "  jog <j> <delta>     move one joint by a relative amount (deg)\n"
+    "  jogvel <j> <v>      velocity-jog one joint at v deg/s (0 to stop); \n"
+    "                      must be refreshed within 200ms or it auto-stops\n"
     "  home                all joints to 0\n"
+    "  ready               go to the singularity-free ready pose\n"
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
+    "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
+    "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
+    "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
+    "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
+    "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
+    "  trackerr <v>        Cartesian block threshold, fraction 0..1 (default 0.1)\n"
+    "  cartvel/cartacc/cartjerk <v>       linear Cartesian limits (m/s, m/s^2, m/s^3)\n"
+    "  cartrotvel/cartrotacc/cartrotjerk <v>  angular Cartesian limits (rad/s, rad/s^2, rad/s^3)\n"
+    "  cartlimits          show current Cartesian motion limits\n"
+    "  record <file.mcap>  start recording /joint_states + /fk_pose to an MCAP file\n"
+    "  record stop         stop recording and close the file\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -104,6 +241,13 @@ static const char* HELP_TEXT =
     "  stats               toggle loop and serial statistics\n"
     "  help                show this help\n"
     "  q / quit            exit\n";
+
+// Maps a Cartesian axis token to a twist index: x y z -> 0 1 2, rx ry rz -> 3 4 5.
+static int cartAxis(const std::string& s) {
+    if (s == "x")  return 0; if (s == "y")  return 1; if (s == "z")  return 2;
+    if (s == "rx") return 3; if (s == "ry") return 4; if (s == "rz") return 5;
+    return -1;
+}
 
 // Parse and apply one command line. Returns a short status string. Shared by the
 // stdin REPL and the UDP interface; thread-safe via g_mtx.
@@ -118,15 +262,146 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
-    if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; return "stopping"; }
+    if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
+    if (tok[0] == "move") {
+        if (tok.size() != 7) return "usage: move x y z rx ry rz (m, rad)";
+        try {
+            double p[6];
+            for (int i = 0; i < 6; i++) p[i] = std::stod(tok[i + 1]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_move_pose[i] = p[i];
+            g_move_request = true;
+            clearJogLocked();
+            return "moving";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "movel") {
+        if (tok.size() != 7) return "usage: movel x y z rx ry rz (m, rad)";
+        try {
+            double p[6];
+            for (int i = 0; i < 6; i++) p[i] = std::stod(tok[i + 1]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_lin_arg[i] = p[i];
+            g_lin_kind = 1;               // absolute pose
+            g_lin_request = true;
+            clearJogLocked();
+            return "moving (linear)";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "cartframe") {
+        if (tok.size() != 2 || (tok[1] != "base" && tok[1] != "tool"))
+            return "usage: cartframe base|tool";
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cart_frame = (tok[1] == "tool") ? 1 : 0;
+        return tok[1] == "tool" ? "cart frame: tool" : "cart frame: base";
+    }
+    if (tok[0] == "cartjog") {
+        if (tok.size() != 3) return "usage: cartjog <x|y|z|rx|ry|rz> <delta>";
+        int ax = cartAxis(tok[1]);
+        if (ax < 0) return "axis must be x y z rx ry rz";
+        try {
+            double d = std::stod(tok[2]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (int i = 0; i < 6; i++) g_lin_arg[i] = 0.0;
+            g_lin_arg[ax] = d;
+            g_lin_kind = 2;               // relative delta in the selected frame
+            g_lin_request = true;
+            clearJogLocked();
+            return "cartjog ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "cartjogvel") {
+        if (tok.size() != 3) return "usage: cartjogvel <x|y|z|rx|ry|rz> <vel>";
+        int ax = cartAxis(tok[1]);
+        if (ax < 0) return "axis must be x y z rx ry rz";
+        try {
+            double v = std::stod(tok[2]);
+            std::lock_guard<std::mutex> lk(g_mtx);
+            clearJointJogLocked();        // Cartesian and joint jogging are mutually exclusive
+            double cap = (ax < 3) ? g_cart_vmax : g_cart_wmax; // cartvel/cartrotvel, unlike joint jogvel, wasn't clamping at all
+            if (v > cap) v = cap; else if (v < -cap) v = -cap;
+            g_cart_jog_vel[ax] = v;
+            if (v != 0.0) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                g_cart_jog_deadline_ns[ax] = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + JOG_TIMEOUT_NS;
+            } else {
+                g_cart_jog_deadline_ns[ax] = 0;
+            }
+            return "cartjogvel ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
     if (tok[0] == "rehome") {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_motor_enable_mask = 0x3f;
         g_target.fill(0.0);
         g_have_new = true;
         g_rehome_request = true;
+        clearJogLocked();
         return "rehoming";
+    }
+
+    if (tok[0] == "trackerr") {
+        if (tok.size() != 2) return "usage: trackerr <0..1>";
+        try {
+            double v = std::stod(tok[1]);
+            if (v <= 0.0 || v > 1.0) return "value must be in (0, 1]";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_cart_track_err_max = v;
+            return "trackerr updated";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "cartvel" || tok[0] == "cartacc" || tok[0] == "cartjerk" ||
+        tok[0] == "cartrotvel" || tok[0] == "cartrotacc" || tok[0] == "cartrotjerk") {
+        if (tok.size() != 2) return "usage: " + tok[0] + " <value>";
+        try {
+            double val = std::stod(tok[1]);
+            if (val <= 0.0) return "value must be > 0";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (tok[0] == "cartvel")          g_cart_vmax  = val;
+            else if (tok[0] == "cartacc")     g_cart_amax  = val;
+            else if (tok[0] == "cartjerk")    g_cart_jmax  = val;
+            else if (tok[0] == "cartrotvel")  g_cart_wmax  = val;
+            else if (tok[0] == "cartrotacc")  g_cart_awmax = val;
+            else                              g_cart_jwmax = val;
+            return tok[0] + " updated";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "cartlimits") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        std::ostringstream os;
+        os << "  linear   vel " << g_cart_vmax  << " m/s      acc " << g_cart_amax  << " m/s^2     jerk " << g_cart_jmax  << " m/s^3\n"
+           << "  angular  vel " << g_cart_wmax  << " rad/s    acc " << g_cart_awmax << " rad/s^2   jerk " << g_cart_jwmax << " rad/s^3\n";
+        return os.str();
+    }
+
+    if (tok[0] == "record") {
+        if (tok.size() == 2 && tok[1] == "stop") {
+            std::lock_guard<std::mutex> lk(g_mcap_mtx);
+            if (!g_mcap_writer) return "not recording";
+            g_mcap_writer->close();
+            g_mcap_writer.reset();
+            return "recording stopped";
+        }
+        if (tok.size() != 2) return "usage: record <file.mcap> | record stop";
+        std::lock_guard<std::mutex> lk(g_mcap_mtx);
+        if (g_mcap_writer) return "already recording -- 'record stop' first";
+        foxglove::McapWriterOptions opts;
+        opts.path = tok[1];
+        auto w = foxglove::McapWriter::create(opts);
+        if (!w) return "failed to open MCAP file: " + tok[1];
+        g_mcap_writer = std::move(*w);
+        return "recording to " + tok[1];
+    }
+
+    if (tok[0] == "ready") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (int i = 0; i < DOFs; i++) g_target[i] = READY_POSE[i];
+        g_have_new = true;
+        clearJogLocked();
+        return "moving to ready pose";
     }
 
     if (tok[0] == "motor") {
@@ -180,7 +455,27 @@ static std::string handleCommand(const std::string& line) {
             if (j < 1 || j > DOFs) return "joint must be 1..6";
             std::lock_guard<std::mutex> lk(g_mtx);
             g_target[j - 1] += d; g_have_new = true;
+            clearJogLocked();
             return "jog ok";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "jogvel") {
+        if (tok.size() != 3) return "usage: jogvel <j> <deg/s>";
+        try {
+            int j = std::stoi(tok[1]); double v = std::stod(tok[2]);
+            if (j < 1 || j > DOFs) return "joint must be 1..6";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            double cap = g_max_vel[j - 1];
+            if (v > cap) v = cap; else if (v < -cap) v = -cap; // Velocity control ignores max_velocity, so clamp here
+            g_jog_vel[j - 1] = v;
+            if (v != 0.0) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                g_jog_deadline_ns[j - 1] = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + JOG_TIMEOUT_NS;
+            } else {
+                g_jog_deadline_ns[j - 1] = 0;
+            }
+            return "jogvel ok";
         } catch (const std::exception&) { return "bad number"; }
     }
 
@@ -198,6 +493,7 @@ static std::string handleCommand(const std::string& line) {
             return "unrecognised command -- type 'help'";
         }
         g_have_new = true;
+        clearJogLocked();
         return "target updated";
     } catch (const std::exception&) { return "could not parse numbers"; }
 }
@@ -247,9 +543,68 @@ static void udpThread(int udp_port) {
     close(g_udp_fd); g_udp_fd = -1;
 }
 
+// Foxglove publisher (separate thread). Owns its OWN Kinematics instance --
+// never touches the control loop's `kin` -- so FK compute and WebSocket I/O
+// can never add latency to the 500Hz serial tick. Publishes:
+//   /joint_states -- actual joint positions, as reported by the ESP32
+//   /fk_pose      -- forward kinematics of those actual positions
+static void foxgloveThread(uint16_t fg_port) {
+    Kinematics kin_fg;
+    static const char* JOINT_NAMES[DOFs] = {"J1", "J2", "J3", "J4", "J5", "J6"};
+
+    foxglove::setLogLevel(foxglove::LogLevel::Warn);
+
+    foxglove::WebSocketServerOptions opts;
+    opts.host = "0.0.0.0"; // LAN-reachable; unauthenticated debug stream, trusted networks only
+    opts.port = fg_port;
+    auto server = foxglove::WebSocketServer::create(std::move(opts));
+    if (!server) { std::cerr << "Foxglove: failed to start WebSocket server\n"; return; }
+    std::cout << "Foxglove WebSocket server on ws://0.0.0.0:" << server->port() << "\n";
+
+    auto jointsChan = foxglove::messages::JointStatesChannel::create("/joint_states");
+    auto poseChan   = foxglove::messages::PoseInFrameChannel::create("/fk_pose");
+    if (!jointsChan || !poseChan) { std::cerr << "Foxglove: failed to create channels\n"; return; }
+
+    while (g_running.load()) {
+        TelemetrySample s;
+        {
+            std::unique_lock<std::mutex> lk(g_fg_mtx);
+            g_fg_cv.wait_for(lk, std::chrono::milliseconds(200), [] { return g_fg_count > 0; });
+        }
+        while (popTelemetry(s)) {
+            foxglove::messages::JointStates js;
+            for (int i = 0; i < DOFs; i++) {
+                foxglove::messages::JointState j;
+                j.name = JOINT_NAMES[i];
+                j.position = s.q_deg[i] * D2R;
+                js.joints.push_back(std::move(j));
+            }
+            jointsChan->log(js, s.t_ns);
+
+            Eigen::VectorXd q_rad(DOFs);
+            for (int i = 0; i < DOFs; i++) q_rad[i] = s.q_deg[i] * D2R;
+            pinocchio::SE3 tcp = kin_fg.fkPose(q_rad);
+            Eigen::Quaterniond quat(tcp.rotation());
+
+            foxglove::messages::PoseInFrame pose;
+            pose.frame_id = "base_link";
+            foxglove::messages::Pose p;
+            p.position    = foxglove::messages::Vector3{tcp.translation().x(), tcp.translation().y(), tcp.translation().z()};
+            p.orientation = foxglove::messages::Quaternion{quat.x(), quat.y(), quat.z(), quat.w()};
+            pose.pose = p;
+            poseChan->log(pose, s.t_ns);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     // Serial port can be given as the first CLI arg, else defaults to SERIAL_PORT.
     const char* port = (argc > 1) ? argv[1] : SERIAL_PORT;
+
+    // Kinematics lives entirely on this (control-loop) thread. It is NOT
+    // thread-safe -- it holds mutable Pinocchio Data + Jacobian scratch buffers.
+    Kinematics kin;
+    kin.setIkTolerances(1e-7, 1e-7, 32);   // servo-rate IK: tolerance IS the jitter floor
 
     // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
     serialib serial;
@@ -304,8 +659,10 @@ int main(int argc, char** argv) {
     // Seed the shared targets with the current position, then start REPL + UDP.
     for (int i = 0; i < DOFs; i++) g_target[i] = input.target_position[i];
     int udp_port = (argc > 2) ? std::atoi(argv[2]) : 5005;
+    int fg_port  = (argc > 3) ? std::atoi(argv[3]) : 8765;
     std::thread repl(inputThread);
     std::thread udp(udpThread, udp_port);
+    std::thread fg(foxgloveThread, (uint16_t)fg_port);
 
     std::cout << "\nStreaming at 500 Hz. Enter commands below (or use the web UI).\n";
 
@@ -319,6 +676,42 @@ int main(int argc, char** argv) {
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     double stats_window_us = 0;
 
+    // Cartesian state, owned exclusively by this loop.
+    Mode mode = Mode::Joint;
+    Ruckig<1> ruck_s(0.002);            // jerk-limited scalar path parameter s in [0,1]
+    InputParameter<1> in_s; in_s.synchronization = Synchronization::Time;
+    OutputParameter<1> out_s;
+    pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
+    pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
+    double lin_vmax_nominal = 0.0;  // unscaled path speed limit, set at path start
+    double lin_amax_nominal = 0.0;
+    double lin_jmax_nominal = 0.0;
+    Eigen::Matrix<double, 6, 1> lin_path_dir = Eigen::Matrix<double, 6, 1>::Zero(); // d(pose)/ds, world twist
+    // Ideal joint path for the current line, solved fresh each tick by IK.
+    Eigen::VectorXd q_ref  = Eigen::VectorXd::Zero(DOFs);
+    Eigen::VectorXd q_prev = Eigen::VectorXd::Zero(DOFs);
+    Eigen::VectorXd dq_ref = Eigen::VectorXd::Zero(DOFs);
+    bool   lin_direct = false;     // this tick's output comes from q_ref, not from ruck
+    double last_sigma_min = 0.0;   // published to the UI as a singularity gauge
+    bool   sing_warned = false;    // rate-limits the "blocked" message
+
+    // Twist ramp for CartVel (hold-jog). Ruckig<6> in Position mode where the
+    // "position" IS the twist itself -- lets g_cart_amax/jmax (and the
+    // rotational pair) shape how fast the commanded twist ramps up/down,
+    // exactly like ruck_s shapes `s` for the straight-line path. Without this,
+    // the twist snapped straight to target and only the per-joint accel/jerk
+    // (via the outer Ruckig) did any shaping -- in joint-space, not Cartesian.
+    Ruckig<6> ruck_jog(0.002);
+    InputParameter<6> in_jog;
+    OutputParameter<6> out_jog;
+    for (int i = 0; i < 6; i++) {
+        in_jog.current_position[i] = 0.0; in_jog.current_velocity[i] = 0.0; in_jog.current_acceleration[i] = 0.0;
+        in_jog.target_position[i]  = 0.0; in_jog.target_velocity[i]  = 0.0; in_jog.target_acceleration[i]  = 0.0;
+        in_jog.max_jerk[i] = 1e6; // no separate cap on the twist's rate-of-jerk-change
+    }
+    in_jog.synchronization = Synchronization::None; // each twist axis (already orthogonal) ramps independently
+
+    // Enter Main loop 
     while (g_running.load()) {
 
         // Measure elapsed time to calculate the loop rate once per second.
@@ -338,7 +731,10 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             if (g_have_new) {
-
+                // A real position command always wins over an in-progress jog.
+                mode = Mode::Joint;
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) input.target_position[i] = g_target[i];
                 g_have_new = false;
             }
@@ -352,6 +748,9 @@ int main(int argc, char** argv) {
             }
             if (g_stop_request) {
                 // Retarget to the current commanded position -> Ruckig ramps to a stop.
+                mode = Mode::Joint;
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
                     input.target_position[i] = input.current_position[i];
                     g_target[i]              = input.current_position[i];
@@ -361,6 +760,7 @@ int main(int argc, char** argv) {
             if (g_sync_request) {
                 // Adopt motor feedback as the planner state. The ESP re-references
                 // its queue on the 0x80 bit, so this produces no motion.
+                mode = Mode::Joint;
                 for (int i = 0; i < DOFs; i++) {
                     input.current_position[i]     = rx_packet.actual_position[i];
                     input.current_velocity[i]     = 0.0;
@@ -369,7 +769,36 @@ int main(int argc, char** argv) {
                     g_target[i]                   = rx_packet.actual_position[i];
                 }
             }
+            if (g_move_request) {
+                g_move_request = false;
+                // deg -> rad for the IK seed (the whole loop works in degrees).
+                Eigen::VectorXd q_seed(DOFs);
+                for (int i = 0; i < DOFs; i++)
+                    q_seed[i] = input.current_position[i] * M_PI / 180.0;
+
+                Eigen::Matrix<double, 6, 1> pose;
+                for (int i = 0; i < 6; i++) pose[i] = g_move_pose[i];
+                auto ik = kin.InverseKinematics_Positional(Kinematics::poseToSE3(pose), q_seed);
+
+                if (ik.status == 1) {
+                    // rad -> deg back into the joint-space Ruckig target.
+                    mode = Mode::Joint;
+                    input.control_interface = ControlInterface::Position;
+                    input.synchronization   = Synchronization::Time;
+                    for (int i = 0; i < DOFs; i++) {
+                        double deg = ik.q[i] * 180.0 / M_PI;
+                        input.target_position[i] = deg;
+                        g_target[i]              = deg;
+                    }
+                    std::fprintf(stderr, "[move] IK ok in %d iters\n", ik.iters);
+                } else {
+                    std::fprintf(stderr, "[move] IK failed (status %d) -- holding\n", ik.status);
+                }
+            }
             if (g_rehome_request) {
+                mode = Mode::Joint;
+                input.control_interface = ControlInterface::Position;
+                input.synchronization   = Synchronization::Time;
                 for (int i = 0; i < DOFs; i++) {
                     input.current_position[i] = 0.0;
                     input.current_velocity[i] = 0.0;
@@ -381,9 +810,237 @@ int main(int argc, char** argv) {
                 g_rehome_hold = true;
                 g_rehome_completion = (uint8_t)(rx_packet.homing_sequence + 1);
             }
+
+            // Velocity jogging ("hold the arrow" in the web UI). Watchdog first: a
+            // jog that hasn't been refreshed within JOG_TIMEOUT_NS auto-stops.
+            struct timespec jog_now; clock_gettime(CLOCK_MONOTONIC, &jog_now);
+            int64_t jog_now_ns = (int64_t)jog_now.tv_sec * 1000000000LL + jog_now.tv_nsec;
+            bool any_jog = false;
+            for (int i = 0; i < DOFs; i++) {
+                if (g_jog_vel[i] != 0.0 && jog_now_ns > g_jog_deadline_ns[i]) g_jog_vel[i] = 0.0;
+                if (g_jog_vel[i] != 0.0) any_jog = true;
+            }
+            // Once a jog starts we stay in Velocity control -- even after every
+            // g_jog_vel hits 0 -- so releasing the arrow just decelerates to a
+            // stop in place. Snapping back to a Position hold here would freeze
+            // a target at the still-moving joint's position, forcing Ruckig to
+            // plan a fresh position move from nonzero velocity, which overshoots
+            // and corrects backward -- exactly the "bounces back" symptom. We
+            // only leave Velocity control from an explicit position command above.
+            if (any_jog || input.control_interface == ControlInterface::Velocity) {
+                if (any_jog) mode = Mode::Joint;   // an active joint jog wins over Cartesian
+                input.control_interface = ControlInterface::Velocity;
+                input.synchronization   = Synchronization::None;
+                for (int i = 0; i < DOFs; i++) {
+                    input.target_velocity[i]     = g_jog_vel[i];
+                    input.target_acceleration[i] = 0.0;
+                }
+                for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // keep the UI's target readout tracking live position
+            }
+
+            // --- Cartesian: straight-line move setup (moveL / cartjog step) ---
+            if (g_lin_request) {
+                g_lin_request = false;
+                Eigen::VectorXd q_rad(DOFs);
+                for (int i = 0; i < DOFs; i++) q_rad[i] = input.current_position[i] * D2R;
+                pinocchio::SE3 start = kin.fkPose(q_rad);
+                pinocchio::SE3 goal;
+                if (g_lin_kind == 1) {                 // absolute pose (base frame)
+                    Eigen::Matrix<double, 6, 1> p;
+                    for (int i = 0; i < 6; i++) p[i] = g_lin_arg[i];
+                    goal = Kinematics::poseToSE3(p);
+                } else {                               // relative delta in the selected frame
+                    Eigen::Vector3d dt(g_lin_arg[0], g_lin_arg[1], g_lin_arg[2]);
+                    Eigen::Vector3d dr(g_lin_arg[3], g_lin_arg[4], g_lin_arg[5]);
+                    if (g_cart_frame == 1)             // tool: post-multiply (axes = TCP)
+                        goal = start * pinocchio::SE3(pinocchio::exp3(dr), dt);
+                    else                               // base: pre-multiply rotation, add world translation
+                        goal = pinocchio::SE3(pinocchio::exp3(dr) * start.rotation(),
+                                              start.translation() + dt);
+                }
+                double lin, ang; Kinematics::poseDistance(start, goal, lin, ang);
+                if (lin < 1e-9 && ang < 1e-9) {
+                    mode = Mode::Joint;               // already there -- nothing to do
+                } else {
+                    // Map the tighter of the linear/angular Cartesian limits onto s in [0,1].
+                    double vmax = std::min(lin > 1e-9 ? g_cart_vmax / lin : 1e9, ang > 1e-9 ? g_cart_wmax  / ang : 1e9);
+                    double amax = std::min(lin > 1e-9 ? g_cart_amax / lin : 1e9, ang > 1e-9 ? g_cart_awmax / ang : 1e9);
+                    double jmax = std::min(lin > 1e-9 ? g_cart_jmax / lin : 1e9, ang > 1e-9 ? g_cart_jwmax / ang : 1e9);
+                    in_s.max_velocity = {vmax}; in_s.max_acceleration = {amax}; in_s.max_jerk = {jmax};
+                    in_s.current_position = {0.0}; in_s.current_velocity = {0.0}; in_s.current_acceleration = {0.0};
+                    in_s.target_position = {1.0};  in_s.target_velocity = {0.0};  in_s.target_acceleration = {0.0};
+                    lin_start = start; lin_goal = goal;
+                    lin_vmax_nominal = vmax; lin_amax_nominal = amax; lin_jmax_nominal = jmax;
+                    Eigen::Vector3d w_local = pinocchio::log3(lin_start.rotation().transpose() * lin_goal.rotation());
+                    lin_path_dir.head<3>() = lin_goal.translation() - lin_start.translation();
+                    lin_path_dir.tail<3>() = lin_start.rotation() * w_local; // approx: fixed at start orientation
+                    q_ref = q_rad;
+                    mode = Mode::CartLin;
+                }
+            }
+
+            // --- Cartesian: velocity-jog watchdog (same 200ms dead-man as joints) ---
+            {
+                struct timespec cnow; clock_gettime(CLOCK_MONOTONIC, &cnow);
+                int64_t cnow_ns = (int64_t)cnow.tv_sec * 1000000000LL + cnow.tv_nsec;
+                bool any_cart = false;
+                for (int i = 0; i < 6; i++) {
+                    if (g_cart_jog_vel[i] != 0.0 && cnow_ns > g_cart_jog_deadline_ns[i]) g_cart_jog_vel[i] = 0.0;
+                    if (g_cart_jog_vel[i] != 0.0) any_cart = true;
+                }
+                if (any_cart) mode = Mode::CartVel;   // a fresh cart jog wins over a finishing lin move
+            }
+
+            // --- Cartesian: resolve twist -> joint velocities (runs last, wins) ---
+            if (mode == Mode::CartVel || mode == Mode::CartLin) {
+                Eigen::VectorXd q_rad(DOFs);
+                for (int i = 0; i < DOFs; i++) q_rad[i] = input.current_position[i] * D2R;
+
+                Eigen::Matrix<double, 6, 1> twist; twist.setZero();
+                pinocchio::ReferenceFrame rf = pinocchio::LOCAL_WORLD_ALIGNED;
+
+                if (mode == Mode::CartVel) {
+                    for (int i = 0; i < 6; i++) twist[i] = g_cart_jog_vel[i];
+                    rf = (g_cart_frame == 1) ? pinocchio::LOCAL : pinocchio::LOCAL_WORLD_ALIGNED;
+                    // Brake the jog itself as sigma_min drops, so the DLS solve is never
+                    // asked to fight a full-speed twist right at the boundary -- that fight
+                    // is what leaks motion into the other axes even with damping.
+                    double sig0 = kin.sigmaMin(q_rad, rf);
+                    if (sig0 < g_cart_speed_scale_eps)
+                        twist *= std::max(0.15, sig0 / g_cart_speed_scale_eps);
+
+                    // Ramp the ACTUAL commanded twist toward this (braked) target,
+                    // respecting Cartesian accel/jerk -- previously it snapped straight
+                    // to target and only the per-joint accel/jerk shaped anything.
+                    for (int i = 0; i < 6; i++) {
+                        in_jog.max_velocity[i]     = (i < 3) ? g_cart_amax : g_cart_awmax;
+                        in_jog.max_acceleration[i] = (i < 3) ? g_cart_jmax : g_cart_jwmax;
+                        in_jog.target_position[i]  = twist[i];
+                    }
+                    ruck_jog.update(in_jog, out_jog);
+                    for (int i = 0; i < 6; i++) twist[i] = out_jog.new_position[i];
+                    out_jog.pass_to_input(in_jog);
+                } else {
+                    // Same braking, applied to the path's own speed limit (not the twist
+                    // after the fact) so `s` never marches ahead of what's achievable --
+                    // that mismatch would just show up later as feedback-driven lag.
+                    double sig0 = kin.sigmaMin(q_rad, rf);
+                    double vscale = (sig0 < g_cart_speed_scale_eps)
+                        ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
+
+                    // Map per-joint velocity/accel/jerk limits onto the scalar path s, so
+                    // a nonlinearly-mapped, jerk-limited s(t) still respects the SAME
+                    // per-joint limits used everywhere else (g_max_vel/acc/jerk), not just
+                    // the path's own Cartesian-space bounds. Recomputed every tick since
+                    // the Jacobian -- and thus how much each joint moves per unit of s --
+                    // changes along the path.
+                    Eigen::VectorXd dqds(DOFs);
+                    kin.resolvedRate(q_ref, lin_path_dir, dqds, rf);
+                    double sdot_cap = 1e9, sddot_cap = 1e9, sdddot_cap = 1e9;
+                    for (int i = 0; i < DOFs; i++) {
+                        double a = std::abs(dqds[i]);
+                        if (a < 1e-9) continue;
+                        sdot_cap   = std::min(sdot_cap,   (g_max_vel[i]  * D2R) / a);
+                        sddot_cap  = std::min(sddot_cap,  (g_max_acc[i]  * D2R) / a);
+                        sdddot_cap = std::min(sdddot_cap, (g_max_jerk[i] * D2R) / a);
+                    }
+                    in_s.max_velocity     = {std::min(lin_vmax_nominal * vscale, sdot_cap)};
+                    in_s.max_acceleration = {std::min(lin_amax_nominal * vscale, sddot_cap)};
+                    in_s.max_jerk         = {std::min(lin_jmax_nominal * vscale, sdddot_cap)};
+
+                    ruck_s.update(in_s, out_s);
+                    double s    = out_s.new_position[0];
+                    out_s.pass_to_input(in_s);
+
+                    pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
+                    q_prev = q_ref;
+                    auto ik = kin.InverseKinematics_Positional(desired, q_ref);
+                    if (ik.status != 1) {
+                        mode = Mode::Joint;
+                        input.control_interface = ControlInterface::Position;
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_position[i] = input.current_position[i];
+                            g_target[i]              = input.current_position[i];
+                        }
+                        std::fprintf(stderr, "[cart] linear move aborted: no IK solution on path at s=%.3f\n", s);
+                    } else {
+                        q_ref = ik.q;
+                        // Must be the exact derivative of what we stream as position: the ESP
+                        // pins step count from pos_cmd and step rate from vel_cmd, so any
+                        // disagreement between the two shows up as roughness.
+                        dq_ref = (q_ref - q_prev) / LOOP_DT;
+                        last_sigma_min = sig0;
+                        lin_direct = true;
+                        for (int i = 0; i < DOFs; i++) g_target[i] = q_ref[i] * R2D;
+                        if (s >= 1.0 - 1e-9) {
+                            mode = Mode::Joint;          // q_ref already IS the goal; nothing to settle
+                            input.control_interface = ControlInterface::Position;
+                            for (int i = 0; i < DOFs; i++) input.target_position[i] = q_ref[i] * R2D;
+                        }
+                    }
+                }
+
+                if (mode == Mode::CartVel) {
+                    input.control_interface = ControlInterface::Velocity;
+                    // Time-sync forces all 6 joints to reach their (constantly updating)
+                    // velocity target together, preserving the ratio resolvedRate solved
+                    // for. Synchronization::None let each joint ramp independently under
+                    // its own accel/jerk limit -- since the Cartesian target keeps moving
+                    // every 2ms tick, joints never truly settle, and independent ramps
+                    // transiently distort the velocity ratio -> leaks into other axes.
+                    // This is the real mechanism behind the drift; no feedback/PID needed.
+                    input.synchronization   = Synchronization::Time;
+                    Eigen::VectorXd dq_rad(DOFs);
+                    auto rr = kin.resolvedRate(q_rad, twist, dq_rad, rf);
+                    last_sigma_min = rr.sigma_min;
+
+                    if (rr.track_err > g_cart_track_err_max) {
+                        // The arm physically cannot produce this twist (singularity or
+                        // reach limit). Hold at zero velocity for this tick only -- stay
+                        // in Velocity control and Cartesian mode so motion resumes the
+                        // instant the twist becomes feasible again (e.g. user reverses).
+                        // Exiting the mode here would make the web UI's ~60ms jog refresh
+                        // re-enter and re-trip this block every cycle, producing a
+                        // start/stop chatter that looks like the arm "going crazy".
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_velocity[i]     = 0.0;
+                            input.target_acceleration[i] = 0.0;
+                        }
+                        if (!sing_warned) {
+                            sing_warned = true;
+                            std::fprintf(stderr,
+                                "[cart] blocked: %.0f%% of requested twist unachievable "
+                                "(sigma_min %.4f) -- holding\n", rr.track_err * 100.0, rr.sigma_min);
+                        }
+                    } else {
+                        sing_warned = false;
+                        Eigen::VectorXd dq_deg = dq_rad * R2D;
+                        // Velocity control ignores max_velocity, so clamp here, preserving direction.
+                        double vscale = 1.0;
+                        for (int i = 0; i < DOFs; i++) {
+                            double a = std::abs(dq_deg[i]);
+                            if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
+                        }
+                        for (int i = 0; i < DOFs; i++) {
+                            input.target_velocity[i]     = dq_deg[i] * vscale;
+                            input.target_acceleration[i] = 0.0;
+                        }
+                    }
+                    for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // UI target tracks live pose
+                }
+            }
         }
 
-        auto res = ruck.update(input, output);
+        if (lin_direct) {
+            for (int i = 0; i < DOFs; i++) {
+                output.new_position[i]     = q_ref[i]  * R2D;
+                output.new_velocity[i]     = dq_ref[i] * R2D;
+                output.new_acceleration[i] = 0.0;
+            }
+            lin_direct = false;
+        } else {
+            ruck.update(input, output);
+        }
 
         // Pass output state to the next cycle's input
         input.current_position = output.new_position;
@@ -417,6 +1074,14 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Hand the freshest actual position to the Foxglove publisher thread.
+        // Just a lock + POD copy -- FK/encode/WebSocket I/O happen off-thread.
+        {
+            struct timespec rt; clock_gettime(CLOCK_REALTIME, &rt);
+            pushTelemetry((uint64_t)rt.tv_sec * 1000000000ULL + (uint64_t)rt.tv_nsec,
+                          rx_packet.actual_position);
+        }
+
         // 4. Optional live telemetry at ~5 Hz. Toggle with 'mon'.
         static int telem = 0;
         if (g_monitor.load() && (++telem % 100 == 0)) {
@@ -442,14 +1107,23 @@ int main(int argc, char** argv) {
             bool have; sockaddr_in cli;
             { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
             if (have) {
-                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask;
+                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame;
                 { std::lock_guard<std::mutex> lk(g_mtx);
                                     for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; }
-                                    enabled_mask = g_motor_enable_mask; }
-                char sb[640];
+                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; }
+                // Live TCP pose: FK of the actual joint feedback (deg -> rad).
+                Eigen::VectorXd q_fb(DOFs);
+                for (int i = 0; i < DOFs; i++) q_fb[i] = rx_packet.actual_position[i] * D2R;
+                Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
+                // Refresh the gauge from feedback while idle; the servo path keeps it live.
+                if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
+                char sb[832];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                    "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                    "\"frame\":\"%s\","
+                    "\"sigma\":%.5f,"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -457,6 +1131,9 @@ int main(int argc, char** argv) {
                     rx_packet.actual_position[0], rx_packet.actual_position[1], rx_packet.actual_position[2],
                     rx_packet.actual_position[3], rx_packet.actual_position[4], rx_packet.actual_position[5],
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
+                    tcp[0],tcp[1],tcp[2],tcp[3],tcp[4],tcp[5],
+                    cart_frame == 1 ? "tool" : "base",
+                    last_sigma_min,
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],
                     jm[0],jm[1],jm[2],jm[3],jm[4],jm[5],
@@ -478,7 +1155,10 @@ int main(int argc, char** argv) {
 
     g_running = false;
     if (udp.joinable())  udp.join();     // exits within the recv timeout
+    if (fg.joinable())   fg.join();      // exits within its 200ms condvar wait
     if (repl.joinable()) repl.detach();  // stdin getline can't be unblocked; let it go
+    { std::lock_guard<std::mutex> lk(g_mcap_mtx);
+      if (g_mcap_writer) { g_mcap_writer->close(); g_mcap_writer.reset(); } }
     serial.closeDevice();
     return 0;
 }
