@@ -726,10 +726,12 @@ int main(int argc, char** argv) {
 
                     if (rr.track_err > CART_TRACK_ERR_MAX) {
                         // The arm physically cannot produce this twist (singularity or
-                        // reach limit). Coast to a stop in Velocity control -- snapping to
-                        // a Position hold while still moving causes the bounce-back.
-                        clearCartJogLocked();
-                        mode = Mode::Joint;
+                        // reach limit). Hold at zero velocity for this tick only -- stay
+                        // in Velocity control and Cartesian mode so motion resumes the
+                        // instant the twist becomes feasible again (e.g. user reverses).
+                        // Exiting the mode here would make the web UI's ~60ms jog refresh
+                        // re-enter and re-trip this block every cycle, producing a
+                        // start/stop chatter that looks like the arm "going crazy".
                         for (int i = 0; i < DOFs; i++) {
                             input.target_velocity[i]     = 0.0;
                             input.target_acceleration[i] = 0.0;
@@ -738,7 +740,7 @@ int main(int argc, char** argv) {
                             sing_warned = true;
                             std::fprintf(stderr,
                                 "[cart] blocked: %.0f%% of requested twist unachievable "
-                                "(sigma_min %.4f) -- stopping\n", rr.track_err * 100.0, rr.sigma_min);
+                                "(sigma_min %.4f) -- holding\n", rr.track_err * 100.0, rr.sigma_min);
                         }
                     } else {
                         sing_warned = false;

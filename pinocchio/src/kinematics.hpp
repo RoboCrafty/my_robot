@@ -33,11 +33,13 @@ class Kinematics{
     double  ik_rot_tol = 1e-2;
     int     ik_max_iters = 100;
     double  ik_max_step_rad = 0.5;
-    double  ik_damping = 1e-4;
-    // Singularity conditioning. sigma_min below sing_eps_ ramps damping in;
-    // both are arm-specific -- watch the reported sigma_min and tune.
-    double  sing_eps_ = 0.02;
-    double  sing_lambda_max_ = 0.05;
+    double  ik_damping = 1e-4;      // regularizer for InverseKinematics_Positional ONLY
+    // Singularity conditioning for resolvedRate (RRMC), independent of ik_damping
+    // above. sigma_min below sing_eps_ ramps this damping in; both are
+    // arm-specific -- watch the reported sigma_min and tune.
+    double  rrmc_min_damping_ = 1e-4; // always-on floor, keeps the solve well-posed
+    double  sing_eps_ = 0.02;         // sigma_min radius where extra damping starts
+    double  sing_lambda_max_ = 0.05;  // damping added at sigma_min == 0 (lambda, not lambda^2)
 
     // Private Functions
     double computeRobotReachFromModel()
@@ -166,7 +168,7 @@ class Kinematics{
     struct RrmcResult {
         double manipulability; // sqrt(det(J J^T))
         double sigma_min;      // smallest singular value of J -- 0 at a singularity
-        double damping;        // lambda^2 actually applied
+        double damping;        // total damping actually applied (floor + adaptive)
         double track_err;      // fraction of the requested twist NOT achieved, 0..1
     };
 
@@ -198,12 +200,12 @@ class Kinematics{
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(JJ_t_, Eigen::EigenvaluesOnly);
         r.sigma_min = std::sqrt(std::max(0.0, es.eigenvalues()(0)));
 
-        r.damping = 0.0;
+        r.damping = rrmc_min_damping_;
         if (r.sigma_min < sing_eps_) {
             const double k = 1.0 - r.sigma_min / sing_eps_;
-            r.damping = sing_lambda_max_ * sing_lambda_max_ * k * k;
+            r.damping += sing_lambda_max_ * sing_lambda_max_ * k * k;
         }
-        JJ_t_.diagonal().array() += (ik_damping + r.damping);
+        JJ_t_.diagonal().array() += r.damping;
         dq_out.noalias() = J_.transpose() * JJ_t_.ldlt().solve(twist);
 
         const double tn = twist.norm();
