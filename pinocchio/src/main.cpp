@@ -69,11 +69,13 @@ const float K_P = 10.0f;
 static constexpr double D2R = M_PI / 180.0;
 static constexpr double R2D = 180.0 / M_PI;
 
-// Cartesian servo tuning.
-// CART_KP: proportional gain (1/s) closing the loop in CartLin (moveL / cartjog
-// step) ONLY -- corrects lag between the commanded path pose and actual pose.
-// Not used by cartjogvel (hold-jog), which streams your twist directly.
-static constexpr double CART_KP = 2.0;
+static constexpr double LOOP_DT = 0.002;           // 500 Hz control period
+
+// A linear move solves IK at every interpolation point, so each tick stands on
+// its own and nothing accumulates. `s` is already jerk-limited and mapped onto
+// the per-joint limits, so the result is fed to the ESP directly rather than
+// through the joint-level Ruckig -- re-planning toward a one-tick-ahead target
+// every cycle is a degenerate problem that produces stalls and reversals.
 
 // Singularity-free "ready" pose (deg). All-zeros is the kinematic zero, but it
 // puts J4 parallel to J6 (wrist singularity), so Cartesian motion is degenerate
@@ -225,6 +227,9 @@ static const char* HELP_TEXT =
     "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
     "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
     "  trackerr <v>        Cartesian block threshold, fraction 0..1 (default 0.1)\n"
+    "  cartvel/cartacc/cartjerk <v>       linear Cartesian limits (m/s, m/s^2, m/s^3)\n"
+    "  cartrotvel/cartrotacc/cartrotjerk <v>  angular Cartesian limits (rad/s, rad/s^2, rad/s^3)\n"
+    "  cartlimits          show current Cartesian motion limits\n"
     "  record <file.mcap>  start recording /joint_states + /fk_pose to an MCAP file\n"
     "  record stop         stop recording and close the file\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
@@ -314,6 +319,8 @@ static std::string handleCommand(const std::string& line) {
             double v = std::stod(tok[2]);
             std::lock_guard<std::mutex> lk(g_mtx);
             clearJointJogLocked();        // Cartesian and joint jogging are mutually exclusive
+            double cap = (ax < 3) ? g_cart_vmax : g_cart_wmax; // cartvel/cartrotvel, unlike joint jogvel, wasn't clamping at all
+            if (v > cap) v = cap; else if (v < -cap) v = -cap;
             g_cart_jog_vel[ax] = v;
             if (v != 0.0) {
                 struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
@@ -343,6 +350,31 @@ static std::string handleCommand(const std::string& line) {
             g_cart_track_err_max = v;
             return "trackerr updated";
         } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "cartvel" || tok[0] == "cartacc" || tok[0] == "cartjerk" ||
+        tok[0] == "cartrotvel" || tok[0] == "cartrotacc" || tok[0] == "cartrotjerk") {
+        if (tok.size() != 2) return "usage: " + tok[0] + " <value>";
+        try {
+            double val = std::stod(tok[1]);
+            if (val <= 0.0) return "value must be > 0";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (tok[0] == "cartvel")          g_cart_vmax  = val;
+            else if (tok[0] == "cartacc")     g_cart_amax  = val;
+            else if (tok[0] == "cartjerk")    g_cart_jmax  = val;
+            else if (tok[0] == "cartrotvel")  g_cart_wmax  = val;
+            else if (tok[0] == "cartrotacc")  g_cart_awmax = val;
+            else                              g_cart_jwmax = val;
+            return tok[0] + " updated";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+
+    if (tok[0] == "cartlimits") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        std::ostringstream os;
+        os << "  linear   vel " << g_cart_vmax  << " m/s      acc " << g_cart_amax  << " m/s^2     jerk " << g_cart_jmax  << " m/s^3\n"
+           << "  angular  vel " << g_cart_wmax  << " rad/s    acc " << g_cart_awmax << " rad/s^2   jerk " << g_cart_jwmax << " rad/s^3\n";
+        return os.str();
     }
 
     if (tok[0] == "record") {
@@ -572,6 +604,7 @@ int main(int argc, char** argv) {
     // Kinematics lives entirely on this (control-loop) thread. It is NOT
     // thread-safe -- it holds mutable Pinocchio Data + Jacobian scratch buffers.
     Kinematics kin;
+    kin.setIkTolerances(1e-7, 1e-7, 32);   // servo-rate IK: tolerance IS the jitter floor
 
     // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
     serialib serial;
@@ -646,13 +679,37 @@ int main(int argc, char** argv) {
     // Cartesian state, owned exclusively by this loop.
     Mode mode = Mode::Joint;
     Ruckig<1> ruck_s(0.002);            // jerk-limited scalar path parameter s in [0,1]
-    InputParameter<1> in_s;
+    InputParameter<1> in_s; in_s.synchronization = Synchronization::Time;
     OutputParameter<1> out_s;
     pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
     pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
     double lin_vmax_nominal = 0.0;  // unscaled path speed limit, set at path start
+    double lin_amax_nominal = 0.0;
+    double lin_jmax_nominal = 0.0;
+    Eigen::Matrix<double, 6, 1> lin_path_dir = Eigen::Matrix<double, 6, 1>::Zero(); // d(pose)/ds, world twist
+    // Ideal joint path for the current line, solved fresh each tick by IK.
+    Eigen::VectorXd q_ref  = Eigen::VectorXd::Zero(DOFs);
+    Eigen::VectorXd q_prev = Eigen::VectorXd::Zero(DOFs);
+    Eigen::VectorXd dq_ref = Eigen::VectorXd::Zero(DOFs);
+    bool   lin_direct = false;     // this tick's output comes from q_ref, not from ruck
     double last_sigma_min = 0.0;   // published to the UI as a singularity gauge
     bool   sing_warned = false;    // rate-limits the "blocked" message
+
+    // Twist ramp for CartVel (hold-jog). Ruckig<6> in Position mode where the
+    // "position" IS the twist itself -- lets g_cart_amax/jmax (and the
+    // rotational pair) shape how fast the commanded twist ramps up/down,
+    // exactly like ruck_s shapes `s` for the straight-line path. Without this,
+    // the twist snapped straight to target and only the per-joint accel/jerk
+    // (via the outer Ruckig) did any shaping -- in joint-space, not Cartesian.
+    Ruckig<6> ruck_jog(0.002);
+    InputParameter<6> in_jog;
+    OutputParameter<6> out_jog;
+    for (int i = 0; i < 6; i++) {
+        in_jog.current_position[i] = 0.0; in_jog.current_velocity[i] = 0.0; in_jog.current_acceleration[i] = 0.0;
+        in_jog.target_position[i]  = 0.0; in_jog.target_velocity[i]  = 0.0; in_jog.target_acceleration[i]  = 0.0;
+        in_jog.max_jerk[i] = 1e6; // no separate cap on the twist's rate-of-jerk-change
+    }
+    in_jog.synchronization = Synchronization::None; // each twist axis (already orthogonal) ramps independently
 
     // Enter Main loop 
     while (g_running.load()) {
@@ -812,7 +869,12 @@ int main(int argc, char** argv) {
                     in_s.max_velocity = {vmax}; in_s.max_acceleration = {amax}; in_s.max_jerk = {jmax};
                     in_s.current_position = {0.0}; in_s.current_velocity = {0.0}; in_s.current_acceleration = {0.0};
                     in_s.target_position = {1.0};  in_s.target_velocity = {0.0};  in_s.target_acceleration = {0.0};
-                    lin_start = start; lin_goal = goal; lin_vmax_nominal = vmax;
+                    lin_start = start; lin_goal = goal;
+                    lin_vmax_nominal = vmax; lin_amax_nominal = amax; lin_jmax_nominal = jmax;
+                    Eigen::Vector3d w_local = pinocchio::log3(lin_start.rotation().transpose() * lin_goal.rotation());
+                    lin_path_dir.head<3>() = lin_goal.translation() - lin_start.translation();
+                    lin_path_dir.tail<3>() = lin_start.rotation() * w_local; // approx: fixed at start orientation
+                    q_ref = q_rad;
                     mode = Mode::CartLin;
                 }
             }
@@ -846,6 +908,18 @@ int main(int argc, char** argv) {
                     double sig0 = kin.sigmaMin(q_rad, rf);
                     if (sig0 < g_cart_speed_scale_eps)
                         twist *= std::max(0.15, sig0 / g_cart_speed_scale_eps);
+
+                    // Ramp the ACTUAL commanded twist toward this (braked) target,
+                    // respecting Cartesian accel/jerk -- previously it snapped straight
+                    // to target and only the per-joint accel/jerk shaped anything.
+                    for (int i = 0; i < 6; i++) {
+                        in_jog.max_velocity[i]     = (i < 3) ? g_cart_amax : g_cart_awmax;
+                        in_jog.max_acceleration[i] = (i < 3) ? g_cart_jmax : g_cart_jwmax;
+                        in_jog.target_position[i]  = twist[i];
+                    }
+                    ruck_jog.update(in_jog, out_jog);
+                    for (int i = 0; i < 6; i++) twist[i] = out_jog.new_position[i];
+                    out_jog.pass_to_input(in_jog);
                 } else {
                     // Same braking, applied to the path's own speed limit (not the twist
                     // after the fact) so `s` never marches ahead of what's achievable --
@@ -853,32 +927,60 @@ int main(int argc, char** argv) {
                     double sig0 = kin.sigmaMin(q_rad, rf);
                     double vscale = (sig0 < g_cart_speed_scale_eps)
                         ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
-                    in_s.max_velocity = {lin_vmax_nominal * vscale};
+
+                    // Map per-joint velocity/accel/jerk limits onto the scalar path s, so
+                    // a nonlinearly-mapped, jerk-limited s(t) still respects the SAME
+                    // per-joint limits used everywhere else (g_max_vel/acc/jerk), not just
+                    // the path's own Cartesian-space bounds. Recomputed every tick since
+                    // the Jacobian -- and thus how much each joint moves per unit of s --
+                    // changes along the path.
+                    Eigen::VectorXd dqds(DOFs);
+                    kin.resolvedRate(q_ref, lin_path_dir, dqds, rf);
+                    double sdot_cap = 1e9, sddot_cap = 1e9, sdddot_cap = 1e9;
+                    for (int i = 0; i < DOFs; i++) {
+                        double a = std::abs(dqds[i]);
+                        if (a < 1e-9) continue;
+                        sdot_cap   = std::min(sdot_cap,   (g_max_vel[i]  * D2R) / a);
+                        sddot_cap  = std::min(sddot_cap,  (g_max_acc[i]  * D2R) / a);
+                        sdddot_cap = std::min(sdddot_cap, (g_max_jerk[i] * D2R) / a);
+                    }
+                    in_s.max_velocity     = {std::min(lin_vmax_nominal * vscale, sdot_cap)};
+                    in_s.max_acceleration = {std::min(lin_amax_nominal * vscale, sddot_cap)};
+                    in_s.max_jerk         = {std::min(lin_jmax_nominal * vscale, sdddot_cap)};
 
                     ruck_s.update(in_s, out_s);
                     double s    = out_s.new_position[0];
-                    double sdot = out_s.new_velocity[0];
-                    pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
-                    pinocchio::SE3 cur     = kin.fkPose(q_rad);
-                    Eigen::Matrix<double, 6, 1> fb = Kinematics::poseError(cur, desired); // world twist
-                    Eigen::Matrix<double, 6, 1> ff; ff.setZero();
-                    ff.head<3>() = (lin_goal.translation() - lin_start.translation()) * sdot;
-                    Eigen::Vector3d w_local = pinocchio::log3(lin_start.rotation().transpose() * lin_goal.rotation());
-                    ff.tail<3>() = desired.rotation() * w_local * sdot; // body path rate -> world frame
-                    twist = ff + CART_KP * fb;
                     out_s.pass_to_input(in_s);
-                    if (s >= 1.0 - 1e-9 && fb.head<3>().norm() < 1e-3 && fb.tail<3>().norm() < 1e-2) {
-                        mode = Mode::Joint;           // settled -> hold at the current position
+
+                    pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
+                    q_prev = q_ref;
+                    auto ik = kin.InverseKinematics_Positional(desired, q_ref);
+                    if (ik.status != 1) {
+                        mode = Mode::Joint;
                         input.control_interface = ControlInterface::Position;
-                        input.synchronization   = Synchronization::Time;
                         for (int i = 0; i < DOFs; i++) {
                             input.target_position[i] = input.current_position[i];
                             g_target[i]              = input.current_position[i];
                         }
+                        std::fprintf(stderr, "[cart] linear move aborted: no IK solution on path at s=%.3f\n", s);
+                    } else {
+                        q_ref = ik.q;
+                        // Must be the exact derivative of what we stream as position: the ESP
+                        // pins step count from pos_cmd and step rate from vel_cmd, so any
+                        // disagreement between the two shows up as roughness.
+                        dq_ref = (q_ref - q_prev) / LOOP_DT;
+                        last_sigma_min = sig0;
+                        lin_direct = true;
+                        for (int i = 0; i < DOFs; i++) g_target[i] = q_ref[i] * R2D;
+                        if (s >= 1.0 - 1e-9) {
+                            mode = Mode::Joint;          // q_ref already IS the goal; nothing to settle
+                            input.control_interface = ControlInterface::Position;
+                            for (int i = 0; i < DOFs; i++) input.target_position[i] = q_ref[i] * R2D;
+                        }
                     }
                 }
 
-                if (mode != Mode::Joint) {
+                if (mode == Mode::CartVel) {
                     input.control_interface = ControlInterface::Velocity;
                     // Time-sync forces all 6 joints to reach their (constantly updating)
                     // velocity target together, preserving the ratio resolvedRate solved
@@ -929,7 +1031,16 @@ int main(int argc, char** argv) {
             }
         }
 
-        auto res = ruck.update(input, output);
+        if (lin_direct) {
+            for (int i = 0; i < DOFs; i++) {
+                output.new_position[i]     = q_ref[i]  * R2D;
+                output.new_velocity[i]     = dq_ref[i] * R2D;
+                output.new_acceleration[i] = 0.0;
+            }
+            lin_direct = false;
+        } else {
+            ruck.update(input, output);
+        }
 
         // Pass output state to the next cycle's input
         input.current_position = output.new_position;

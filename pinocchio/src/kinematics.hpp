@@ -76,6 +76,12 @@ class Kinematics{
     // Status: 2 -> failed, out of reach
     // Status: 3 -> failed, could not converge within iteration limit
 
+    // Servo use needs a far tighter stop than one-shot use: the solver exits as
+    // soon as it is inside tolerance, so the tolerance is the tick-to-tick jitter.
+    void setIkTolerances(double pos_tol, double rot_tol, int max_iters) {
+        ik_pos_tol = pos_tol; ik_rot_tol = rot_tol; ik_max_iters = max_iters;
+    }
+
     // Public Functions
     Kinematics()
     {
