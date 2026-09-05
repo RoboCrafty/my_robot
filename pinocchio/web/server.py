@@ -14,10 +14,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 HERE = Path(__file__).parent
 CFG_FILE = HERE / "poses.json"
+STATIC_DIR = HERE / "static"
+ASSETS_DIR = HERE.parent / "src" / "assets"   # parol6.urdf + meshes/, shared with the C++ side
 ESP_ADDR = ("127.0.0.1", 5005)   # where parolController listens (arg 2)
 
 app = FastAPI()
@@ -91,7 +94,13 @@ async def _startup() -> None:
 
 @app.get("/")
 async def index():
-    return FileResponse(HERE / "static" / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+# The 3D viewer fetches the same URDF the controller runs on, so the model on
+# screen can never drift from the model doing the kinematics.
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 async def run_playback(steps: list[dict]) -> None:

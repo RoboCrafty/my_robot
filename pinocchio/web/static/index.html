@@ -4,490 +4,153 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Parol6 Control</title>
-<style>
-  :root { --bg:#12151c; --panel:#1b2029; --line:#2a3240; --fg:#e6eaf0; --mut:#8b95a5;
-          --accent:#4c8bf5; --good:#37c871; --warn:#f5a623; --bad:#e5484d; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
-  header h1 { font-size:16px; margin:0; font-weight:600; }
-  #status { margin-left:auto; font-size:12px; color:var(--mut); }
-  #status.ok { color:var(--good); } #status.err { color:var(--bad); }
-  .wrap { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; grid-template-columns:1fr 1fr; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
-  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:0 0 12px; }
-  .span2 { grid-column:1 / -1; }
-  .btn { background:#242c38; color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:7px 11px; cursor:pointer; font-size:13px; }
-  .btn:hover { border-color:var(--accent); }
-  .btn.accent { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .btn.bad { background:var(--bad); border-color:var(--bad); color:#fff; }
-  .btn.sm { padding:4px 8px; font-size:12px; }
-  .row { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-  .jname { width:28px; color:var(--mut); font-weight:600; }
-  input[type=range] { flex:1; accent-color:var(--accent); }
-  input[type=number], input[type=text] { background:#0f131a; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; width:70px; }
-  .num { width:64px; text-align:right; font-variant-numeric:tabular-nums; }
-  .act { width:64px; text-align:right; color:var(--good); font-variant-numeric:tabular-nums; }
-  .motor { width:56px; }
-  .motor.off { color:var(--mut); }
-  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
-  .inc { display:flex; gap:6px; align-items:center; }
-  .inc .btn.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); font-size:13px; }
-  th { color:var(--mut); font-weight:500; }
-  .list { display:flex; flex-direction:column; gap:6px; max-height:230px; overflow:auto; }
-  .item { display:flex; align-items:center; gap:8px; background:#0f131a; border:1px solid var(--line); border-radius:7px; padding:6px 8px; }
-  .item .nm { flex:1; }
-  .mut { color:var(--mut); }
-</style>
+<link rel="stylesheet" href="/static/css/app.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three/build/three.module.js",
+    "three/examples/jsm/": "/static/vendor/three/examples/jsm/",
+    "urdf-loader": "/static/vendor/urdf-loader/src/URDFLoader.js"
+  }
+}
+</script>
 </head>
 <body>
+
 <header>
-  <h1>Parol6 Control</h1>
-  <button class="btn" onclick="sync()">Sync&nbsp;↺</button>
-  <button class="btn" onclick="cmd('home')">Home</button>
-  <button class="btn" onclick="cmd('ready')">Ready</button>
-  <button class="btn bad" onclick="rehome()">Rehome</button>
-  <button class="btn bad" onclick="cmd('stop')">STOP</button>
+  <h1>Parol6</h1>
+  <button class="btn" data-act="sync" title="Align the planner to motor feedback (no motion)">Sync ↺</button>
+  <button class="btn" data-act="home">Home</button>
+  <button class="btn" data-act="ready">Ready</button>
+  <span class="sep"></span>
+  <button class="btn bad" data-act="rehome">Rehome</button>
+  <button class="btn bad" data-act="stop" title="Spacebar">STOP</button>
   <span id="status">connecting…</span>
 </header>
 
-<div class="wrap">
-  <!-- Jog / joints -->
-  <section class="panel span2">
-    <h2>Joints</h2>
-    <div class="toolbar">
-      <span class="mut">Jog mode:</span>
-      <div class="inc" id="modeBar"></div>
-      <span class="mut">Step:</span>
-      <div class="inc" id="incBar"></div>
-      <input type="number" id="incCustom" class="num" placeholder="deg" step="1" style="width:70px" />
-      <button class="btn sm" onclick="addIncrement()">＋ preset</button>
-      <span class="mut">Hold speed °/s:</span>
-      <input type="number" id="jogSpeed" class="num" value="20" step="1" min="1" onchange="jogSpeed=+this.value||20" />
-    </div>
-    <div id="joints"></div>
-  </section>
+<div class="app">
+  <!-- ============================================================ left -->
+  <div class="col">
+    <section class="panel viewer-card">
+      <div id="viewport">
+        <div id="loadMsg">loading model…</div>
 
-  <!-- Cartesian jog -->
-  <section class="panel span2">
-    <h2>Cartesian</h2>
-    <div class="toolbar">
-      <span class="mut">Frame:</span>
-      <div class="inc" id="cartFrameBar"></div>
-      <span class="mut">Lin step m:</span>
-      <div class="inc" id="cartLinIncBar"></div>
-      <span class="mut">Rot step °:</span>
-      <div class="inc" id="cartAngIncBar"></div>
-      <span class="mut">Hold m/s:</span>
-      <input type="number" id="cartLinSpeed" class="num" value="0.05" step="0.01" min="0.001" onchange="cartLinSpeed=+this.value||0.05" />
-      <span class="mut">°/s:</span>
-      <input type="number" id="cartAngSpeed" class="num" value="15" step="1" min="1" onchange="cartAngSpeed=+this.value||15" />
-    </div>
-    <div id="cartAxes"></div>
-    <div class="toolbar" style="margin-top:8px">
-      <span class="mut">TCP:</span>
-      <span class="act" id="tcpReadout" style="width:auto; letter-spacing:.02em">—</span>
-      <span style="flex:1"></span>
-      <span class="mut">σmin:</span>
-      <span class="act" id="sigReadout" style="width:auto">—</span>
-    </div>
-  </section>
+        <div class="vp-overlay vp-tl">
+          <div class="seg" id="viewBar"></div>
+        </div>
 
-  <section class="panel span2">
-    <h2>Motor torque</h2>
-    <div class="toolbar" id="motorBar"></div>
-  </section>
+        <div class="vp-overlay vp-tr">
+          <div class="seg" id="frameBarVp"></div>
+          <button class="btn sm" id="btnTrail" title="Draw the path the TCP follows">Trail</button>
+          <button class="btn sm" id="btnTrailClear" title="Clear the trail">✕</button>
+          <button class="btn sm" id="btnPlan" title="Drag the TCP to plan a move">Plan</button>
+        </div>
 
-  <!-- Poses -->
-  <section class="panel">
-    <h2>Poses</h2>
-    <div class="row">
-      <input type="text" id="poseName" placeholder="pose name" style="flex:1" />
-      <button class="btn accent" onclick="savePose()">Save current</button>
-    </div>
-    <div class="list" id="poseList"></div>
-  </section>
+        <div class="vp-overlay vp-bl">
+          <div class="readout" id="vpReadout"></div>
+        </div>
+      </div>
+    </section>
 
-  <!-- Limits -->
-  <section class="panel">
-    <h2>Motion limits</h2>
-    <table>
-      <thead><tr><th>J</th><th>vel °/s</th><th>acc °/s²</th><th>jerk °/s³</th></tr></thead>
-      <tbody id="limitBody"></tbody>
-    </table>
-    <div style="margin-top:10px"><button class="btn accent" onclick="applyLimits()">Apply limits</button></div>
-  </section>
+    <section class="panel" id="planPanel" style="display:none">
+      <h2>Planned move
+        <span class="right">
+          <span class="seg" id="planModeBar"></span>
+          <span class="badge" id="planReach">—</span>
+        </span>
+      </h2>
+      <div class="readout" id="planReadout" style="grid-template-columns:auto auto auto auto"></div>
+      <div class="toolbar" style="margin-top:10px">
+        <button class="btn accent" id="btnPlanGoL">▶ Move L (straight)</button>
+        <button class="btn" id="btnPlanGoJ">▶ Move J (joint)</button>
+        <button class="btn ghost" id="btnPlanReset">Reset to current</button>
+      </div>
+    </section>
 
-  <!-- Sequences -->
-  <section class="panel span2">
-    <h2>Sequence / playback</h2>
-    <div class="toolbar">
-      <select id="seqPose" class="btn"></select>
-      <span class="mut">dwell</span>
-      <input type="number" id="seqDwell" class="num" value="1.5" step="0.1" min="0" />
-      <span class="mut">s</span>
-      <button class="btn sm" onclick="addStep()">＋ add step</button>
-      <span style="flex:1"></span>
-      <input type="text" id="seqName" placeholder="sequence name" />
-      <button class="btn" onclick="saveSeq()">Save</button>
-      <button class="btn accent" onclick="playCurrent()">▶ Play</button>
-      <button class="btn bad" onclick="stopPlay()">■ Stop</button>
-    </div>
-    <div class="list" id="stepList"></div>
-    <h2 style="margin-top:14px">Saved sequences</h2>
-    <div class="list" id="seqList"></div>
-  </section>
+    <section class="panel">
+      <h2>Poses</h2>
+      <div class="toolbar" style="margin-bottom:10px">
+        <input type="text" id="poseName" placeholder="pose name" style="flex:1;width:auto" />
+        <button class="btn accent" data-act="savePose">Save current</button>
+      </div>
+      <div class="list" id="poseList"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Sequence / playback</h2>
+      <div class="toolbar">
+        <select id="seqPose"></select>
+        <span class="mut">dwell</span>
+        <input type="number" id="seqDwell" class="num" value="1.5" step="0.1" min="0" style="width:60px" />
+        <span class="mut">s</span>
+        <button class="btn sm" data-act="addStep">＋ step</button>
+        <span style="flex:1"></span>
+        <input type="text" id="seqName" placeholder="sequence name" style="width:130px" />
+        <button class="btn sm" data-act="saveSeq">Save</button>
+        <button class="btn sm accent" data-act="play">▶</button>
+        <button class="btn sm bad" data-act="stopPlay">■</button>
+      </div>
+      <div class="list" id="stepList" style="margin-top:8px"></div>
+      <div class="jog-sub">Saved sequences</div>
+      <div class="list" id="seqList"></div>
+    </section>
+  </div>
+
+  <!-- =========================================================== right -->
+  <div class="col">
+    <section class="panel">
+      <h2>Cartesian jog
+        <span class="right">
+          <span class="seg" id="modeBar"></span>
+          <span class="seg" id="frameBar"></span>
+        </span>
+      </h2>
+      <div class="jogpad" id="cartLin"></div>
+      <div class="toolbar" style="margin-top:8px">
+        <span class="mut">step</span><div class="seg" id="cartLinIncBar"></div>
+        <span class="mut">m/s</span>
+        <input type="number" id="cartLinSpeed" class="num" value="0.05" step="0.01" min="0.001" style="width:66px" />
+      </div>
+
+      <div class="jog-sub">Rotate about TCP</div>
+      <div class="jogpad" id="cartAng"></div>
+      <div class="toolbar" style="margin-top:8px">
+        <span class="mut">step</span><div class="seg" id="cartAngIncBar"></div>
+        <span class="mut">°/s</span>
+        <input type="number" id="cartAngSpeed" class="num" value="15" step="1" min="1" style="width:66px" />
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Joints
+        <span class="right">
+          <span class="mut">step</span><span class="seg" id="incBar"></span>
+          <span class="mut">°/s</span>
+          <input type="number" id="jogSpeed" class="num" value="20" step="1" min="1" style="width:56px" />
+        </span>
+      </h2>
+      <div id="joints"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Motor torque</h2>
+      <div class="motorbar" id="motorBar"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Motion limits
+        <span class="right"><button class="btn sm accent" data-act="applyLimits">Apply</button></span>
+      </h2>
+      <table>
+        <thead><tr><th>J</th><th>vel °/s</th><th>acc °/s²</th><th>jerk °/s³</th></tr></thead>
+        <tbody id="limitBody"></tbody>
+      </table>
+    </section>
+  </div>
 </div>
 
-<script>
-const NJ = 6, JMIN = -180, JMAX = 180;
-let state = { pos:Array(NJ).fill(0), tgt:Array(NJ).fill(0), vmax:Array(NJ).fill(0), amax:Array(NJ).fill(0), jmax:Array(NJ).fill(0), enabled:Array(NJ).fill(1) };
-let config = { poses:{}, sequences:{}, increments:[5,10,20] };
-let selInc = 10;                   // deg per click (step mode)
-let jogSpeed = 20;                 // deg/s while a jog arrow is held (hold mode)
-let jogMode = 'step';               // 'step' | 'hold' -- explicit toggle, no tap/hold guessing
-const jogTimers = Array(NJ).fill(null); // per-joint setInterval id while an arrow is held
-let curSteps = [];                 // working sequence: [{pose, dwell}]
-const sliderBusy = Array(NJ).fill(0);
+<div id="toasts"></div>
 
-// ---- Cartesian jog state (reuses the same 'step'/'hold' jogMode as joints) ----
-const CART_AXES = ['x','y','z','rx','ry','rz'];
-let cartFrame = 'base';            // 'base' | 'tool' -- mirrors controller g_cart_frame
-let cartLinStep = 0.01;             // metres per step click
-let cartAngStep = 5;                // degrees per step click
-let cartLinSpeed = 0.05;            // m/s while a translation arrow is held
-let cartAngSpeed = 15;              // deg/s while a rotation arrow is held
-const cartJogTimers = Array(6).fill(null);
-
-// ---- WebSocket ----
-let ws;
-function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen  = () => setStatus("connected", "ok");
-  ws.onclose = () => { setStatus("disconnected — retrying", "err"); setTimeout(connect, 1000); };
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type === "state")  onState(m);
-    if (m.type === "config") { config = { increments:[5,10,20], ...m }; renderConfig(); }
-    if (m.type === "play_done") setStatus("connected · play done", "ok");
-  };
-}
-function send(o) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(o));
-  } else {
-    setStatus("controller connection unavailable", "err");
-  }
-}
-function cmd(line) { send({ type:"cmd", line }); }
-function setStatus(t, c) { const s = document.getElementById("status"); s.textContent = t; s.className = c || ""; }
-
-// ---- Joints UI ----
-function buildJoints() {
-  const root = document.getElementById("joints");
-  root.innerHTML = "";
-  for (let j = 0; j < NJ; j++) {
-    const r = document.createElement("div"); r.className = "row";
-    r.innerHTML = `
-      <span class="jname">J${j+1}</span>
-      <button class="btn sm" data-jog="${j}:-1">−</button>
-      <input type="range" id="sl${j}" min="${JMIN}" max="${JMAX}" step="0.1" value="0">
-      <button class="btn sm" data-jog="${j}:1">＋</button>
-      <input type="number" id="tg${j}" class="num" step="0.1" onchange="setJoint(${j}, this.value)">
-      <span class="act" id="ac${j}">0.0</span>
-      <button class="btn sm" onclick="cmd('${j+1} 0')" title="joint to 0">0</button>`;
-    root.appendChild(r);
-    const sl = r.querySelector(`#sl${j}`);
-    sl.addEventListener("input", () => { sliderBusy[j] = Date.now(); setJoint(j, sl.value); });
-    r.querySelectorAll("[data-jog]").forEach(btn => {
-      const [jj, dir] = btn.dataset.jog.split(":").map(Number);
-      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); if (jogMode === 'hold') startJog(jj, dir); });
-      btn.addEventListener("pointerup", () => { if (jogMode === 'hold') stopJog(jj); else stepJog(jj, dir); });
-      btn.addEventListener("pointerleave", () => { if (jogMode === 'hold') stopJog(jj); });
-      btn.addEventListener("pointercancel", () => { if (jogMode === 'hold') stopJog(jj); });
-    });
-  }
-}
-function onState(m) {
-  state = {
-    ...state,
-    ...m,
-    enabled: Array.isArray(m.enabled) ? m.enabled : state.enabled,
-  };
-  for (let j = 0; j < NJ; j++) {
-    document.getElementById(`ac${j}`).textContent = (+m.pos[j]).toFixed(1);
-    if (Date.now() - sliderBusy[j] > 700) {          // don't fight the user while dragging
-      document.getElementById(`sl${j}`).value = m.tgt[j];
-      document.getElementById(`tg${j}`).value = (+m.tgt[j]).toFixed(1);
-    }
-  }
-  // reflect limits (only when not editing)
-  for (let j = 0; j < NJ; j++) {
-    setIfIdle(`v${j}`, m.vmax[j]); setIfIdle(`a${j}`, m.amax[j]); setIfIdle(`k${j}`, m.jmax[j]);
-  }
-  // Live TCP pose (FK of actual feedback): metres for X/Y/Z, degrees for RX/RY/RZ.
-  if (Array.isArray(m.tcp)) {
-    const t = m.tcp, dg = 180/Math.PI;
-    document.getElementById("tcpReadout").textContent =
-      `X ${t[0].toFixed(3)}  Y ${t[1].toFixed(3)}  Z ${t[2].toFixed(3)}  ` +
-      `RX ${(t[3]*dg).toFixed(1)}  RY ${(t[4]*dg).toFixed(1)}  RZ ${(t[5]*dg).toFixed(1)}`;
-  }
-  if (m.frame && m.frame !== cartFrame) { cartFrame = m.frame; renderCartFrame(); }
-  // Distance to a singularity. Colour-coded so you can see one coming.
-  if (typeof m.sigma === "number") {
-    const el = document.getElementById("sigReadout");
-    el.textContent = m.sigma.toFixed(4);
-    el.style.color = m.sigma < 0.02 ? "var(--bad)" : m.sigma < 0.05 ? "var(--warn)" : "var(--good)";
-  }
-  renderMotors();
-}
-function setIfIdle(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
-function setJoint(j, val) { cmd(`${j+1} ${(+val).toFixed(3)}`); }
-
-// ---- Jog: 'step' mode = discrete position move per click; 'hold' mode =
-// continuous velocity jog while the button is physically held. The mode is an
-// explicit toggle, not a timing guess, so there is no tap/hold ambiguity.
-function stepJog(j, dir) { cmd(`jog ${j+1} ${dir*selInc}`); sliderBusy[j] = Date.now(); }
-function sendJogVel(j, v) { cmd(`jogvel ${j+1} ${v.toFixed(2)}`); }
-function startJog(j, dir) {
-  sliderBusy[j] = Date.now();
-  sendJogVel(j, dir * jogSpeed);
-  if (jogTimers[j]) clearInterval(jogTimers[j]);
-  // Refresh well below the controller's watchdog so it never auto-stops mid-hold.
-  jogTimers[j] = setInterval(() => sendJogVel(j, dir * jogSpeed), 60);
-}
-function stopJog(j) {
-  if (jogTimers[j]) { clearInterval(jogTimers[j]); jogTimers[j] = null; }
-  sendJogVel(j, 0);
-}
-function stopAllJogs() { for (let j = 0; j < NJ; j++) stopJog(j); }
-window.addEventListener("blur", stopAllJogs);
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllJogs(); });
-
-// ---- Cartesian jog: same 'step'/'hold' semantics as joints, but in task space.
-// Step  -> cartjog <axis> <delta>  (straight-line nudge)
-// Hold  -> cartjogvel <axis> <vel> refreshed under the 200ms watchdog.
-function buildCartesian() {
-  const root = document.getElementById("cartAxes");
-  root.innerHTML = "";
-  CART_AXES.forEach((name, a) => {
-    const unit = a < 3 ? "m" : "°";
-    const r = document.createElement("div"); r.className = "row";
-    r.innerHTML = `
-      <span class="jname">${name.toUpperCase()}</span>
-      <button class="btn sm" data-cartjog="${a}:-1">−</button>
-      <button class="btn sm" data-cartjog="${a}:1">＋</button>
-      <span class="mut">${unit}</span>`;
-    root.appendChild(r);
-    r.querySelectorAll("[data-cartjog]").forEach(btn => {
-      const [ax, dir] = btn.dataset.cartjog.split(":").map(Number);
-      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); if (jogMode === 'hold') startCartJog(ax, dir); });
-      btn.addEventListener("pointerup", () => { if (jogMode === 'hold') stopCartJog(ax); else stepCartJog(ax, dir); });
-      btn.addEventListener("pointerleave", () => { if (jogMode === 'hold') stopCartJog(ax); });
-      btn.addEventListener("pointercancel", () => { if (jogMode === 'hold') stopCartJog(ax); });
-    });
-  });
-}
-function stepCartJog(a, dir) {
-  const d = a < 3 ? cartLinStep : cartAngStep * Math.PI / 180; // rot step is entered in degrees
-  cmd(`cartjog ${CART_AXES[a]} ${(dir * d).toFixed(5)}`);
-}
-function sendCartJogVel(a, v) { cmd(`cartjogvel ${CART_AXES[a]} ${v.toFixed(4)}`); }
-function startCartJog(a, dir) {
-  const v = dir * (a < 3 ? cartLinSpeed : cartAngSpeed * Math.PI / 180);
-  sendCartJogVel(a, v);
-  if (cartJogTimers[a]) clearInterval(cartJogTimers[a]);
-  cartJogTimers[a] = setInterval(() => sendCartJogVel(a, v), 60);
-}
-function stopCartJog(a) {
-  if (cartJogTimers[a]) { clearInterval(cartJogTimers[a]); cartJogTimers[a] = null; }
-  sendCartJogVel(a, 0);
-}
-function stopAllCartJogs() { for (let a = 0; a < 6; a++) stopCartJog(a); }
-window.addEventListener("blur", stopAllCartJogs);
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllCartJogs(); });
-
-function renderCartFrame() {
-  const bar = document.getElementById("cartFrameBar"); bar.innerHTML = "";
-  [['base','Base'], ['tool','Tool']].forEach(([val, label]) => {
-    const b = document.createElement("button");
-    b.className = "btn sm" + (val === cartFrame ? " on" : "");
-    b.textContent = label;
-    b.onclick = () => { stopAllCartJogs(); cartFrame = val; renderCartFrame(); cmd(`cartframe ${val}`); };
-    bar.appendChild(b);
-  });
-}
-function renderCartIncs() {
-  const lin = document.getElementById("cartLinIncBar"); lin.innerHTML = "";
-  [0.001, 0.005, 0.01, 0.05].forEach(v => {
-    const b = document.createElement("button");
-    b.className = "btn sm" + (v === cartLinStep ? " on" : "");
-    b.textContent = v;
-    b.onclick = () => { cartLinStep = v; renderCartIncs(); };
-    lin.appendChild(b);
-  });
-  const ang = document.getElementById("cartAngIncBar"); ang.innerHTML = "";
-  [1, 5, 15, 45].forEach(v => {
-    const b = document.createElement("button");
-    b.className = "btn sm" + (v === cartAngStep ? " on" : "");
-    b.textContent = v;
-    b.onclick = () => { cartAngStep = v; renderCartIncs(); };
-    ang.appendChild(b);
-  });
-}
-
-function renderModes() {
-  const bar = document.getElementById("modeBar"); bar.innerHTML = "";
-  [['step','Step'], ['hold','Hold']].forEach(([val, label]) => {
-    const b = document.createElement("button");
-    b.className = "btn sm" + (val === jogMode ? " on" : "");
-    b.textContent = label;
-    b.onclick = () => { stopAllJogs(); stopAllCartJogs(); jogMode = val; renderModes(); };
-    bar.appendChild(b);
-  });
-}
-
-function sync() { cmd('sync'); }
-function rehome() {
-  if (confirm("Rehome all joints using the limit switches?")) cmd("rehome");
-}
-
-function renderMotors() {
-  const bar = document.getElementById("motorBar"); bar.innerHTML = "";
-  for (let j = 0; j < NJ; j++) {
-    const enabled = !!state.enabled[j];
-    const b = document.createElement("button");
-    b.className = "btn motor" + (enabled ? " accent" : " off");
-    b.textContent = `J${j+1} ${enabled ? "On" : "Off"}`;
-    b.onclick = () => cmd(`motor ${j+1} ${enabled ? "off" : "on"}`);
-    bar.appendChild(b);
-  }
-}
-
-// ---- Increments ----
-function renderIncrements() {
-  const bar = document.getElementById("incBar"); bar.innerHTML = "";
-  (config.increments || []).forEach(v => {
-    const b = document.createElement("button");
-    b.className = "btn sm" + (v === selInc ? " on" : "");
-    b.textContent = v + "°";
-    b.onclick = () => { selInc = v; renderIncrements(); };
-    bar.appendChild(b);
-  });
-}
-function addIncrement() {
-  const v = parseFloat(document.getElementById("incCustom").value);
-  if (!isFinite(v) || v <= 0) return;
-  const inc = Array.from(new Set([...(config.increments||[]), v])).sort((a,b)=>a-b);
-  send({ type:"set_increments", values: inc });
-  selInc = v;
-}
-
-
-// ---- Limits ----
-function buildLimits() {
-  const b = document.getElementById("limitBody"); b.innerHTML = "";
-  for (let j = 0; j < NJ; j++) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>J${j+1}</td>
-      <td><input id="v${j}" type="number" class="num" step="1"></td>
-      <td><input id="a${j}" type="number" class="num" step="10"></td>
-      <td><input id="k${j}" type="number" class="num" step="10"></td>`;
-    b.appendChild(tr);
-  }
-}
-function applyLimits() {
-  for (let j = 0; j < NJ; j++) {
-    const v = document.getElementById(`v${j}`).value;
-    const a = document.getElementById(`a${j}`).value;
-    const k = document.getElementById(`k${j}`).value;
-    if (v) cmd(`vel ${j+1} ${v}`);
-    if (a) cmd(`acc ${j+1} ${a}`);
-    if (k) cmd(`jerk ${j+1} ${k}`);
-  }
-}
-
-// ---- Poses ----
-function savePose() {
-  const name = document.getElementById("poseName").value.trim();
-  if (!name) return;
-  send({ type:"save_pose", name, angles: state.tgt.map(Number) });
-  document.getElementById("poseName").value = "";
-}
-function gotoPose(name) { const a = config.poses[name]; if (a) cmd(a.map(x=>(+x).toFixed(3)).join(" ")); }
-function deletePose(name) { send({ type:"delete_pose", name }); }
-function renderPoses() {
-  const list = document.getElementById("poseList"); list.innerHTML = "";
-  const sel = document.getElementById("seqPose"); sel.innerHTML = "";
-  Object.entries(config.poses).forEach(([name, a]) => {
-    const it = document.createElement("div"); it.className = "item";
-    it.innerHTML = `<span class="nm">${name}</span>
-      <span class="mut">${a.map(x=>(+x).toFixed(0)).join(", ")}</span>
-      <button class="btn sm accent" onclick="gotoPose('${name}')">Go</button>
-      <button class="btn sm bad" onclick="deletePose('${name}')">✕</button>`;
-    list.appendChild(it);
-    const o = document.createElement("option"); o.value = name; o.textContent = name; sel.appendChild(o);
-  });
-}
-
-// ---- Sequences ----
-function addStep() {
-  const pose = document.getElementById("seqPose").value;
-  const dwell = parseFloat(document.getElementById("seqDwell").value) || 1;
-  if (!pose) return;
-  curSteps.push({ pose, dwell });
-  renderSteps();
-}
-function renderSteps() {
-  const l = document.getElementById("stepList"); l.innerHTML = "";
-  curSteps.forEach((s, i) => {
-    const it = document.createElement("div"); it.className = "item";
-    it.innerHTML = `<span class="mut">${i+1}.</span><span class="nm">${s.pose}</span>
-      <span class="mut">${s.dwell}s</span>
-      <button class="btn sm bad" onclick="curSteps.splice(${i},1);renderSteps()">✕</button>`;
-    l.appendChild(it);
-  });
-}
-function stepsToAngles(steps) {
-  return steps.map(s => ({ angles: (config.poses[s.pose] || []).map(Number), dwell: s.dwell }))
-              .filter(s => s.angles.length === NJ);
-}
-function playCurrent() { if (curSteps.length) send({ type:"play", steps: stepsToAngles(curSteps) }); }
-function stopPlay() { send({ type:"stop_play" }); }
-function saveSeq() {
-  const name = document.getElementById("seqName").value.trim();
-  if (!name || !curSteps.length) return;
-  send({ type:"save_seq", name, steps: curSteps });
-  document.getElementById("seqName").value = "";
-}
-function playSeq(name) { const s = config.sequences[name]; if (s) send({ type:"play", steps: stepsToAngles(s) }); }
-function deleteSeq(name) { send({ type:"delete_seq", name }); }
-function renderSeqs() {
-  const l = document.getElementById("seqList"); l.innerHTML = "";
-  Object.entries(config.sequences).forEach(([name, steps]) => {
-    const it = document.createElement("div"); it.className = "item";
-    it.innerHTML = `<span class="nm">${name}</span>
-      <span class="mut">${steps.length} steps</span>
-      <button class="btn sm accent" onclick="playSeq('${name}')">▶</button>
-      <button class="btn sm bad" onclick="deleteSeq('${name}')">✕</button>`;
-    l.appendChild(it);
-  });
-}
-
-function renderConfig() { renderIncrements(); renderPoses(); renderSeqs(); }
-
-// ---- init ----
-buildJoints();
-buildLimits();
-buildCartesian();
-renderMotors();
-renderIncrements();
-renderCartFrame();
-renderCartIncs();
-renderModes();
-connect();
-</script>
+<script type="module" src="/static/js/app.js"></script>
 </body>
 </html>
