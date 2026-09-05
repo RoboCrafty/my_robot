@@ -63,15 +63,15 @@ static constexpr double D2R = M_PI / 180.0;
 static constexpr double R2D = 180.0 / M_PI;
 
 // Cartesian servo tuning.
-static constexpr double CART_KP    = 2.0;   // pose-error feedback gain (1/s)
-// Stop Cartesian motion once this fraction of the requested twist is unachievable.
-// Directional, so a blocked rotation axis doesn't veto achievable translation.
-static constexpr double CART_TRACK_ERR_MAX = 0.30;
+// CART_KP: proportional gain (1/s) closing the loop in CartLin (moveL / cartjog
+// step) ONLY -- corrects lag between the commanded path pose and actual pose.
+// Not used by cartjogvel (hold-jog), which streams your twist directly.
+static constexpr double CART_KP = 2.0;
 
 // Singularity-free "ready" pose (deg). All-zeros is the kinematic zero, but it
 // puts J4 parallel to J6 (wrist singularity), so Cartesian motion is degenerate
 // there. J5 off zero unfolds the wrist. Tune to taste.
-static const double READY_POSE[6] = {0, 0, 0, 0, -90, 0};
+static const double READY_POSE[6] = {0, 0, 0, 0, 45, 0};
 
 // Which mode fills tx_packet each tick. Every mode still ends at joint pos+vel.
 enum class Mode { Joint, CartVel, CartLin };
@@ -122,6 +122,12 @@ static bool   g_lin_request = false;  // guarded by g_mtx
 static double g_cart_vmax  = 0.10, g_cart_amax  = 0.40, g_cart_jmax  = 2.0;
 static double g_cart_wmax  = 0.80, g_cart_awmax = 3.0,  g_cart_jwmax = 15.0;
 
+// Stop Cartesian motion once this FRACTION (0..1, NOT a distance) of the
+// requested twist is unachievable -- directional, so one blocked rotation axis
+// doesn't veto achievable translation. 0.30 = tolerate up to 30% mismatch;
+// only trips very close to a true singularity. Live-tunable: 'trackerr <v>'.
+static double g_cart_track_err_max = 0.10;  // guarded by g_mtx
+
 
 // Velocity jogging ("hold the arrow" in the web UI). Non-zero entries put that
 // joint under Ruckig's Velocity control interface instead of Position. Each
@@ -167,6 +173,7 @@ static const char* HELP_TEXT =
     "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
     "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
     "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
+    "  trackerr <v>        Cartesian block threshold, fraction 0..1 (default 0.1)\n"
     "  motor <j|all> <on|off>  enable or disable driver torque\n"
     "  vel  <j|all> <v>    set max velocity (deg/s)\n"
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
@@ -272,6 +279,17 @@ static std::string handleCommand(const std::string& line) {
         g_rehome_request = true;
         clearJogLocked();
         return "rehoming";
+    }
+
+    if (tok[0] == "trackerr") {
+        if (tok.size() != 2) return "usage: trackerr <0..1>";
+        try {
+            double v = std::stod(tok[1]);
+            if (v <= 0.0 || v > 1.0) return "value must be in (0, 1]";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_cart_track_err_max = v;
+            return "trackerr updated";
+        } catch (const std::exception&) { return "bad number"; }
     }
 
     if (tok[0] == "ready") {
@@ -724,7 +742,7 @@ int main(int argc, char** argv) {
                     auto rr = kin.resolvedRate(q_rad, twist, dq_rad, rf);
                     last_sigma_min = rr.sigma_min;
 
-                    if (rr.track_err > CART_TRACK_ERR_MAX) {
+                    if (rr.track_err > g_cart_track_err_max) {
                         // The arm physically cannot produce this twist (singularity or
                         // reach limit). Hold at zero velocity for this tick only -- stay
                         // in Velocity control and Cartesian mode so motion resumes the

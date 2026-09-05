@@ -37,7 +37,7 @@ class Kinematics{
     // Singularity conditioning for resolvedRate (RRMC), independent of ik_damping
     // above. sigma_min below sing_eps_ ramps this damping in; both are
     // arm-specific -- watch the reported sigma_min and tune.
-    double  rrmc_min_damping_ = 1e-4; // always-on floor, keeps the solve well-posed
+    double  rrmc_min_damping_ = 1e-4*0; // always-on floor, keeps the solve well-posed
     double  sing_eps_ = 0.02;         // sigma_min radius where extra damping starts
     double  sing_lambda_max_ = 0.05;  // damping added at sigma_min == 0 (lambda, not lambda^2)
 
@@ -168,7 +168,7 @@ class Kinematics{
     struct RrmcResult {
         double manipulability; // sqrt(det(J J^T))
         double sigma_min;      // smallest singular value of J -- 0 at a singularity
-        double damping;        // total damping actually applied (floor + adaptive)
+        double damping;        // lambda^2 actually applied
         double track_err;      // fraction of the requested twist NOT achieved, 0..1
     };
 
@@ -200,12 +200,12 @@ class Kinematics{
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(JJ_t_, Eigen::EigenvaluesOnly);
         r.sigma_min = std::sqrt(std::max(0.0, es.eigenvalues()(0)));
 
-        r.damping = rrmc_min_damping_;
+        r.damping = 0.0;
         if (r.sigma_min < sing_eps_) {
             const double k = 1.0 - r.sigma_min / sing_eps_;
-            r.damping += sing_lambda_max_ * sing_lambda_max_ * k * k;
+            r.damping = sing_lambda_max_ * sing_lambda_max_ * k * k;
         }
-        JJ_t_.diagonal().array() += r.damping;
+        JJ_t_.diagonal().array() += (ik_damping + r.damping);
         dq_out.noalias() = J_.transpose() * JJ_t_.ldlt().solve(twist);
 
         const double tn = twist.norm();

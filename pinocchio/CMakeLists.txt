@@ -8,7 +8,7 @@ set(CMAKE_BUILD_TYPE Release)
 # find_package(pinocchio REQUIRED)
 # find_package(PkgConfig REQUIRED)
 # pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
-
+set(BUILD_SHARED_LIBS OFF)
 include(FetchContent)
 FetchContent_Declare(
   ruckig
@@ -34,7 +34,7 @@ target_link_libraries(parolController ruckig::ruckig Threads::Threads readline
                       Eigen3::Eigen pinocchio::pinocchio)
 
 target_compile_definitions(parolController PRIVATE
-  PAROL_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/assets/parol6.urdf")
+  PAROL_URDF_PATH="src/assets/parol6.urdf")
 
 
 add_executable(parolFk src/kin-test.cpp)
@@ -43,4 +43,4 @@ target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio nlohman
 
 
 target_compile_definitions(parolFk PRIVATE
-  PAROL_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/assets/parol6.urdf")
+  PAROL_URDF_PATH="src/assets/parol6.urdf")
