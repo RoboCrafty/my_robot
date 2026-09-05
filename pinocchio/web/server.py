@@ -10,6 +10,7 @@ Deps: pip install fastapi "uvicorn[standard]"
 """
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -22,8 +23,6 @@ CFG_FILE = HERE / "poses.json"
 STATIC_DIR = HERE / "static"
 ASSETS_DIR = HERE.parent / "src" / "assets"   # parol6.urdf + meshes/, shared with the C++ side
 ESP_ADDR = ("127.0.0.1", 5005)   # where parolController listens (arg 2)
-
-app = FastAPI()
 
 clients: set[WebSocket] = set()
 udp_transport: asyncio.DatagramTransport | None = None
@@ -75,11 +74,11 @@ class StateProto(asyncio.DatagramProtocol):
         asyncio.create_task(broadcast(json.dumps({"type": "state", **state})))
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     global udp_transport
     loop = asyncio.get_running_loop()
-    udp_transport, _ = await loop.create_datagram_endpoint(
+    udp_transport, _proto = await loop.create_datagram_endpoint(
         StateProto, remote_addr=ESP_ADDR
     )
 
@@ -89,7 +88,15 @@ async def _startup() -> None:
             send_cmd("ping")
             await asyncio.sleep(1.0)
 
-    asyncio.create_task(keepalive())
+    task = asyncio.create_task(keepalive())
+    try:
+        yield
+    finally:
+        task.cancel()
+        udp_transport.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
