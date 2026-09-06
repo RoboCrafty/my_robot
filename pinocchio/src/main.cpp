@@ -80,7 +80,7 @@ static constexpr double LOOP_DT = 0.002;           // 500 Hz control period
 // Singularity-free "ready" pose (deg). All-zeros is the kinematic zero, but it
 // puts J4 parallel to J6 (wrist singularity), so Cartesian motion is degenerate
 // there. J5 off zero unfolds the wrist. Tune to taste.
-static const double READY_POSE[6] = {0, 0, 0, 0, 45, 0};
+static const double READY_POSE[6] = {0, 16, 20, 0, 54, 0};
 
 // Which mode fills tx_packet each tick. Every mode still ends at joint pos+vel.
 enum class Mode { Joint, CartVel, CartLin };
