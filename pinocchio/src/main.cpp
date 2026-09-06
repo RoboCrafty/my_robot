@@ -71,6 +71,39 @@ static constexpr double R2D = 180.0 / M_PI;
 
 static constexpr double LOOP_DT = 0.002;           // 500 Hz control period
 
+// Stand-in for the ESP32, used when no hardware is attached. Mirrors what the
+// firmware does with a command packet: the step generator pins step count to
+// pos_cmd, so enabled joints track it exactly; disabled joints hold; a rehome
+// request zeroes the joints and bumps homing_sequence. Kinematic only -- there
+// is no torque or following-error model here, so it will not reproduce
+// mechanical stalls.
+struct SimEsp {
+    float   pos[6] = {0};
+    uint8_t homing_sequence = 0;
+    int     rehome_ticks = -1;
+
+    void step(const PiToEspPacket& tx, EspToPiPacket& rx) {
+        // Report first: real hardware always answers with the *previous* tick's
+        // position, and keeping that one-cycle latency here means the planner
+        // sees the same timing it will on the bench.
+        memcpy(rx.actual_position, pos, sizeof(pos));
+        rx.homing_sequence = homing_sequence;
+
+        if (tx.motor_enable_mask & FLAG_REHOME) rehome_ticks = 500; // ~1 s of "homing"
+        if (rehome_ticks > 0) {
+            if (--rehome_ticks == 0) {
+                for (int i = 0; i < 6; i++) pos[i] = 0.0f;
+                homing_sequence++;
+            }
+            return;
+        }
+        if (tx.flags & FLAG_HOLD) return;
+        for (int i = 0; i < 6; i++)
+            if (tx.motor_enable_mask & (1u << i)) pos[i] = tx.pos_cmd[i];
+    }
+};
+
+
 // A linear move solves IK at every interpolation point, so each tick stands on
 // its own and nothing accumulates. `s` is already jerk-limited and mapped onto
 // the per-joint limits, so the result is fed to the ESP directly rather than
@@ -92,6 +125,9 @@ static bool                     g_have_new = false; // guarded by g_mtx
 static std::atomic<bool>        g_running{true};
 static std::atomic<bool>        g_monitor{false};   // live one-line telemetry on/off
 static std::atomic<bool>        g_stats{false};     // loop/serial counters on/off
+static std::atomic<bool>        g_sim{false};       // drive SimEsp instead of the serial link
+static std::atomic<bool>        g_serial_ok{false}; // a real port is open, so 'sim off' is possible
+static int                      g_sim_request = -1; // -1 none, 0 off, 1 on; guarded by g_mtx
 
 // Per-joint motion limits (deg/s, deg/s^2, deg/s^3). Editable live via the
 // vel/acc/jerk commands (guarded by g_mtx once the REPL runs). J2 is the
@@ -221,6 +257,7 @@ static const char* HELP_TEXT =
     "  rehome              run the ESP32 limit-switch homing sequence\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
+    "  sim <on|off>        run against the built-in ESP32 simulator\n"
     "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
     "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
     "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
@@ -264,6 +301,16 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
+    if (tok[0] == "sim") {
+        if (tok.size() != 2 || (tok[1] != "on" && tok[1] != "off")) return "usage: sim <on|off>";
+        bool want = (tok[1] == "on");
+        if (want == g_sim.load()) return want ? "already simulating" : "already on hardware";
+        if (!want && !g_serial_ok.load()) return "no serial port open -- cannot leave the simulator";
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_sim_request = want ? 1 : 0;   // the control loop owns the switch
+        clearJogLocked();
+        return want ? "simulator ON" : "simulator OFF";
+    }
     if (tok[0] == "move") {
         if (tok.size() != 7) return "usage: move x y z rx ry rz (m, rad)";
         try {
@@ -500,6 +547,13 @@ static std::string handleCommand(const std::string& line) {
 
 // Background stdin REPL.
 static void inputThread() {
+    // With no terminal (systemd, nohup, `< /dev/null`) readline hits EOF at once,
+    // which would otherwise read as Ctrl-D and shut the controller down. Leave
+    // the UDP interface as the only front end in that case.
+    if (!isatty(STDIN_FILENO)) {
+        std::cout << "stdin is not a terminal -- REPL disabled, use the UDP interface.\n";
+        return;
+    }
     std::cout << HELP_TEXT;
     while (g_running.load()) {
         char* raw = readline("\n> ");
@@ -598,23 +652,48 @@ static void foxgloveThread(uint16_t fg_port) {
 }
 
 int main(int argc, char** argv) {
-    // Serial port can be given as the first CLI arg, else defaults to SERIAL_PORT.
-    const char* port = (argc > 1) ? argv[1] : SERIAL_PORT;
+    // Flags may appear anywhere; the remaining positional args keep the old
+    // meaning: <serial port> [udp port] [foxglove port].
+    const char* port = SERIAL_PORT;
+    int udp_port = 5005, fg_port = 8765;
+    bool start_sim = false;
+    for (int i = 1, pos = 0; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--sim")  { start_sim = true; continue; }
+        if (a == "-h" || a == "--help") {
+            std::cout << "usage: parolController [--sim] [serial port] [udp port] [foxglove port]\n"
+                         "  --sim   start against the built-in ESP32 simulator; no hardware needed\n"
+                         "          (also reachable at runtime with the 'sim on|off' command)\n";
+            return 0;
+        }
+        if (pos == 0)      port     = argv[i];
+        else if (pos == 1) udp_port = std::atoi(argv[i]);
+        else if (pos == 2) fg_port  = std::atoi(argv[i]);
+        pos++;
+    }
 
     // Kinematics lives entirely on this (control-loop) thread. It is NOT
     // thread-safe -- it holds mutable Pinocchio Data + Jacobian scratch buffers.
     Kinematics kin;
     kin.setIkTolerances(1e-7, 1e-7, 32);   // servo-rate IK: tolerance IS the jitter floor
 
-    // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0)
-    serialib serial;
+    SimEsp sim;
 
-    // Connection to serial port
-    if (serial.openDevice(port, 921600) != 1) {
-        std::cerr << "Failed to open serial port: " << port << std::endl;
+    // Open High-Speed Serial Port (e.g., /dev/ttyAMA0 or /dev/ttyUSB0). In sim
+    // mode a missing port is fine -- but if one IS there we still open it, so
+    // 'sim off' can hand control back to real hardware without a restart.
+    serialib serial;
+    bool serial_ok = (serial.openDevice(port, 921600) == 1);
+    g_serial_ok = serial_ok;
+    if (serial_ok) {
+        std::cout << "Successful connection to " << port << std::endl;
+    } else if (!start_sim) {
+        std::cerr << "Failed to open serial port: " << port << "\n"
+                  << "Pass --sim to run without hardware.\n";
         return 1;
+    } else {
+        std::cout << "No serial port at " << port << " -- simulator only.\n";
     }
-    std::cout << "Successful connection to " << port << std::endl;
 
     PiToEspPacket tx_packet = {0};
     EspToPiPacket rx_packet = {0};
@@ -623,19 +702,26 @@ int main(int argc, char** argv) {
     tx_packet.motor_enable_mask = 0x3f;
     tx_packet.flags = FLAG_HOLD; // keep torque on, skip motion until pos received
 
-    // Handshake: retry until we get actual position without commanding any motion.
-    bool got_initial_pos = false;
-    for (int retry = 0; retry < 30; retry++) {
-        serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
-        if (readFramedPacket(serial, rx_reader, rx_packet, 50)) {
-            got_initial_pos = true;
-            break;
+    if (start_sim) {
+        g_sim = true;
+        sim.step(tx_packet, rx_packet);
+        std::cout << "SIMULATOR mode -- no motion will reach the arm.\n";
+    } else {
+        // Handshake: retry until we get actual position without commanding any motion.
+        bool got_initial_pos = false;
+        for (int retry = 0; retry < 30; retry++) {
+            serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
+            if (readFramedPacket(serial, rx_reader, rx_packet, 50)) {
+                got_initial_pos = true;
+                break;
+            }
         }
-    }
-    if (!got_initial_pos) {
-        std::cerr << "No position reply from ESP32 after 30 attempts. Is it running?\n";
-        serial.closeDevice();
-        return 1;
+        if (!got_initial_pos) {
+            std::cerr << "No position reply from ESP32 after 30 attempts. Is it running?\n"
+                      << "Pass --sim to run without hardware.\n";
+            serial.closeDevice();
+            return 1;
+        }
     }
     tx_packet.motor_enable_mask = 0x3f;
     tx_packet.flags = 0;
@@ -658,15 +744,13 @@ int main(int argc, char** argv) {
 
     // Seed the shared targets with the current position, then start REPL + UDP.
     for (int i = 0; i < DOFs; i++) g_target[i] = input.target_position[i];
-    int udp_port = (argc > 2) ? std::atoi(argv[2]) : 5005;
-    int fg_port  = (argc > 3) ? std::atoi(argv[3]) : 8765;
     std::thread repl(inputThread);
     std::thread udp(udpThread, udp_port);
     std::thread fg(foxgloveThread, (uint16_t)fg_port);
 
     std::cout << "\nStreaming at 500 Hz. Enter commands below (or use the web UI).\n";
 
-    serial.flushReceiver();
+    if (serial_ok) serial.flushReceiver();
 
     struct timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
@@ -767,6 +851,29 @@ int main(int argc, char** argv) {
                     input.current_acceleration[i] = 0.0;
                     input.target_position[i]      = rx_packet.actual_position[i];
                     g_target[i]                   = rx_packet.actual_position[i];
+                }
+            }
+            if (g_sim_request >= 0) {
+                bool want = (g_sim_request == 1);
+                g_sim_request = -1;
+                if (want != g_sim.load()) {
+                    // Hand the planner's current position to whichever side is
+                    // taking over, so the switch itself commands no motion.
+                    if (want) {
+                        for (int i = 0; i < DOFs; i++) sim.pos[i] = (float)input.current_position[i];
+                        sim.homing_sequence = rx_packet.homing_sequence;
+                        g_sim = true;
+                    } else {
+                        g_sim = false;
+                        serial.flushReceiver();
+                        g_sync_request = true;   // re-reference to the real encoders next tick
+                    }
+                    mode = Mode::Joint;
+                    input.control_interface = ControlInterface::Position;
+                    for (int i = 0; i < DOFs; i++) {
+                        input.target_position[i] = input.current_position[i];
+                        g_target[i]              = input.current_position[i];
+                    }
                 }
             }
             if (g_move_request) {
@@ -1062,15 +1169,25 @@ int main(int argc, char** argv) {
         output.pass_to_input(input);
 
         // 2. Send Velocity Command (COBS-framed + CRC16)
-        serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
-        tx_count++;
-
-        // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
-        if (readFramedPacket(serial, rx_reader, rx_packet, 1)) {
-            rx_count++;
+        const bool simulating = g_sim.load();
+        if (simulating) {
+            sim.step(tx_packet, rx_packet);
+            tx_count++; rx_count++;
             if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
                 g_rehome_hold = false;
                 std::cout << "Rehome complete\n";
+            }
+        } else {
+            serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
+            tx_count++;
+
+            // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
+            if (readFramedPacket(serial, rx_reader, rx_packet, 1)) {
+                rx_count++;
+                if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
+                    g_rehome_hold = false;
+                    std::cout << "Rehome complete\n";
+                }
             }
         }
 
@@ -1117,12 +1234,13 @@ int main(int argc, char** argv) {
                 Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
                 // Refresh the gauge from feedback while idle; the servo path keeps it live.
                 if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
-                char sb[832];
+                char sb[896];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
                     "\"frame\":\"%s\","
+                    "\"sim\":%s,\"can_sim_off\":%s,"
                     "\"sigma\":%.5f,"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -1133,6 +1251,8 @@ int main(int argc, char** argv) {
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
                     tcp[0],tcp[1],tcp[2],tcp[3],tcp[4],tcp[5],
                     cart_frame == 1 ? "tool" : "base",
+                    simulating ? "true" : "false",
+                    g_serial_ok.load() ? "true" : "false",
                     last_sigma_min,
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],

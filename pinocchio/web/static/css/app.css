@@ -63,6 +63,11 @@ header h1 { font-size: 14px; margin: 0 4px 0 0; font-weight: 650; white-space: n
 header .sep { width: 1px; height: 18px; background: var(--line-2); margin: 0 2px; flex: none; }
 header .btn { flex: none; }
 .btn.stop { flex: none; background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; letter-spacing: .04em; }
+.btn.sim { flex: none; font-weight: 700; letter-spacing: .04em; }
+.btn.sim.on { background: var(--warn); border-color: var(--warn); color: #221a05; }
+.btn.sim[hidden] { display: none; }
+/* Unmissable reminder that nothing on screen is touching the real arm. */
+body.simulating .stage { box-shadow: inset 0 0 0 2px var(--warn); }
 #status {
   padding-left: 10px; font-size: 11.5px; color: var(--mut);
   display: flex; align-items: center; gap: 6px; white-space: nowrap; flex: none;
