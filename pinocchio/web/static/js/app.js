@@ -97,7 +97,7 @@ const viewer = new RobotViewer($('viewport'), {
 
 window.parol = { viewer };   // debug handle: inspect frames from the browser console
 
-viewer.load('/assets/parol6.urdf').then(() => {
+viewer.load('/assets/parol6-PGripper.urdf').then(() => {
     $('loadMsg').remove();
     jointLimits = viewer.jointLimits();
     buildJoints();
@@ -152,6 +152,7 @@ function onState(m) {
 
     if (Array.isArray(m.tcp)) renderReadout(m.tcp, m.sigma);
     if (m.frame && m.frame !== S.cartFrame) { S.cartFrame = m.frame; viewer.setFrame(m.frame); renderFrameBars(); }
+    if (typeof m.sim === 'boolean') renderSim(m.sim, m.can_sim_off !== false);
 
     if (typeof m.sigma === 'number' && m.sigma < 0.02 && Date.now() - lastSigmaWarn > 5000) {
         lastSigmaWarn = Date.now();
@@ -160,6 +161,23 @@ function onState(m) {
     renderMotors();
 }
 function setIfIdle(id, v) { const el = $(id); if (el && document.activeElement !== el) el.value = v; }
+
+// The controller owns this flag; the button only mirrors it and asks for a change.
+let simOn = null;
+function renderSim(on, canLeave) {
+    const b = $('btnSim');
+    b.hidden = false;
+    b.classList.toggle('on', on);
+    b.textContent = on ? 'SIM' : 'LIVE';
+    b.disabled = on && !canLeave;
+    b.title = b.disabled
+        ? 'No serial port open — restart with a real port to leave the simulator'
+        : (on ? 'Simulated ESP32 — click to switch to hardware'
+              : 'Driving real hardware — click to switch to the simulator');
+    document.body.classList.toggle('simulating', on);
+    if (simOn !== null && simOn !== on) toast(on ? 'Simulator ON' : 'Now driving hardware', on ? 'warn' : 'good');
+    simOn = on;
+}
 
 function renderReadout(t, sigma) {
     const cls = sigma < 0.02 ? 'bad' : sigma < 0.05 ? 'warn' : 'good';
@@ -529,6 +547,11 @@ $('btnTrail').onclick = () => {
     viewer.setTrail(S.trail);
 };
 $('btnTrailClear').onclick = () => viewer.clearTrail();
+$('btnSim').onclick = () => {
+    if (simOn && !confirm('Leave the simulator and drive the real arm?')) return;
+    stopEverything();
+    cmd(`sim ${simOn ? 'off' : 'on'}`);
+};
 $('btnPlan').onclick = togglePlan;
 $('btnPlanGoL').onclick = () => planCmd('movel');
 $('btnPlanGoJ').onclick = () => planCmd('move');

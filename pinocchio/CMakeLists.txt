@@ -60,7 +60,7 @@ target_link_libraries(parolController ruckig::ruckig Threads::Threads readline
                       Eigen3::Eigen pinocchio::pinocchio foxglove_cpp)
 
 target_compile_definitions(parolController PRIVATE
-  PAROL_URDF_PATH="src/assets/parol6.urdf")
+  PAROL_URDF_PATH="src/assets/parol6-PGripper.urdf")
 
 
 add_executable(parolFk src/kin-test.cpp)
@@ -69,4 +69,4 @@ target_link_libraries(parolFk PRIVATE Eigen3::Eigen pinocchio::pinocchio nlohman
 
 
 target_compile_definitions(parolFk PRIVATE
-  PAROL_URDF_PATH="src/assets/parol6.urdf")
+  PAROL_URDF_PATH="src/assets/parol6-PGripper.urdf")
