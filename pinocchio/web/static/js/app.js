@@ -3,21 +3,26 @@ import { RobotViewer, AXIS_COLORS } from './viewer.js';
 const NJ = 6;
 const CART_AXES = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
 const JOG_REFRESH_MS = 60;          // must stay under the controller's 200 ms dead-man
+const TABS = [['jog', 'Jog'], ['joints', 'Joints'], ['poses', 'Poses'], ['setup', 'Setup']];
 
 const $ = (id) => document.getElementById(id);
 const rad2deg = 180 / Math.PI;
+const axColor = (a) => '#' + AXIS_COLORS[a % 3].toString(16).padStart(6, '0');
+
+const DEFAULTS = {
+    jogMode: 'hold', cartFrame: 'base',
+    jogSpeed: 20, cartLinSpeed: 0.05, cartAngSpeed: 15,
+    selInc: 10, cartLinStep: 0.01, cartAngStep: 5,
+    trail: true, tab: 'jog',
+};
+let S = { ...DEFAULTS };
 
 let state = {
     pos: Array(NJ).fill(0), tgt: Array(NJ).fill(0), tcp: Array(6).fill(0),
     vmax: Array(NJ).fill(0), amax: Array(NJ).fill(0), jmax: Array(NJ).fill(0),
     enabled: Array(NJ).fill(1), sigma: 1, frame: 'base',
 };
-let config = { poses: {}, sequences: {}, increments: [5, 10, 20] };
-
-let jogMode = 'hold';               // 'step' | 'hold'
-let cartFrame = 'base';
-let selInc = 10, cartLinStep = 0.01, cartAngStep = 5;
-let cartLinSpeed = 0.05, cartAngSpeed = 15, jogSpeed = 20;
+let config = { poses: {}, sequences: {}, increments: [5, 10, 20], settings: {} };
 let jointLimits = null;
 let curSteps = [];
 const sliderBusy = Array(NJ).fill(0);
@@ -27,13 +32,13 @@ const cartJogTimers = Array(6).fill(null);
 // ------------------------------------------------------------------ transport
 let ws = null;
 function connect() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     ws.onopen = () => setStatus('connected', 'ok');
     ws.onclose = () => { setStatus('disconnected — retrying', 'err'); setTimeout(connect, 1000); };
     ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
         if (m.type === 'state') onState(m);
-        else if (m.type === 'config') { config = { increments: [5, 10, 20], ...m }; renderConfig(); }
+        else if (m.type === 'config') onConfig(m);
         else if (m.type === 'play_done') toast('Sequence finished', 'good');
     };
 }
@@ -52,10 +57,41 @@ function toast(msg, kind = '', ms = 3000) {
     setTimeout(() => el.remove(), ms);
 }
 
+// ------------------------------------------------------------------ settings
+function onConfig(m) {
+    config = { increments: [5, 10, 20], settings: {}, ...m };
+    S = { ...DEFAULTS, ...(config.settings || {}) };
+    applySettings();
+    renderAll();
+}
+function applySettings() {
+    $('jogSpeed').value = S.jogSpeed;
+    $('cartLinSpeed').value = S.cartLinSpeed;
+    $('cartAngSpeed').value = S.cartAngSpeed;
+    viewer.setFrame(S.cartFrame);
+    viewer.setTrail(S.trail);
+    $('btnTrail').classList.toggle('on', S.trail);
+    // Config is re-broadcast on every pose/sequence edit, so only nudge the
+    // controller when the frame actually differs from what it reports.
+    if (state.frame !== S.cartFrame) cmd(`cartframe ${S.cartFrame}`);
+    showTab(S.tab);
+}
+function saveSettings() {
+    send({ type: 'save_settings', values: { ...S } });
+    toast('Settings saved', 'good', 1800);
+}
+function resetSettings() {
+    S = { ...DEFAULTS };
+    applySettings();
+    renderAll();
+    send({ type: 'save_settings', values: { ...S } });
+    toast('Settings reset', 'good', 1800);
+}
+
 // -------------------------------------------------------------------- viewer
 const viewer = new RobotViewer($('viewport'), {
     onDragJog: (axis, rate) => dragJog(axis, rate),
-    onDragEnd: () => stopAllCartJogs(),
+    onDragEnd: () => { stopAllCartJogs(); hideHud(); },
     onPlanChange: (p) => renderPlan(p),
 });
 
@@ -65,7 +101,7 @@ viewer.load('/assets/parol6.urdf').then(() => {
     $('loadMsg').remove();
     jointLimits = viewer.jointLimits();
     buildJoints();
-    viewer.setFrame(cartFrame);
+    viewer.setFrame(S.cartFrame);
 }).catch(err => {
     $('loadMsg').textContent = 'failed to load model: ' + err;
     console.error(err);
@@ -74,15 +110,34 @@ viewer.load('/assets/parol6.urdf').then(() => {
 // A drag on a TCP handle produces a -1..1 rate; scale it by the same speed the
 // on-screen jog buttons use so both paths feel identical.
 function dragJog(axis, rate) {
-    const v = rate * (axis < 3 ? cartLinSpeed : cartAngSpeed / rad2deg);
-    startCartJogVel(axis, v);
+    const max = axis < 3 ? S.cartLinSpeed : S.cartAngSpeed / rad2deg;
+    startCartJogVel(axis, rate * max);
+    showHud(axis, rate);
 }
+
+// --------------------------------------------------------------- speed HUD
+// Shows how fast the arm is being asked to move while an axis is dragged or
+// held, so a small drag visibly reads as a small commanded speed.
+function showHud(axis, rate) {
+    const hud = $('jogHud');
+    hud.hidden = false;
+    hud.style.setProperty('--ax', axColor(axis));
+    $('hudAx').textContent = CART_AXES[axis].toUpperCase();
+    const mag = Math.min(1, Math.abs(rate));
+    const fill = $('hudFill');
+    fill.style.width = (mag * 50) + '%';
+    fill.style.left = rate >= 0 ? '50%' : (50 - mag * 50) + '%';
+    const v = axis < 3
+        ? `${(rate * S.cartLinSpeed).toFixed(4)} m/s`
+        : `${(rate * S.cartAngSpeed).toFixed(1)} °/s`;
+    $('hudVal').textContent = v;
+}
+function hideHud() { $('jogHud').hidden = true; }
 
 // ------------------------------------------------------------------- state in
 let lastSigmaWarn = 0;
 function onState(m) {
     state = { ...state, ...m, enabled: Array.isArray(m.enabled) ? m.enabled : state.enabled };
-
     viewer.setJoints(m.pos);
 
     for (let j = 0; j < NJ; j++) {
@@ -96,9 +151,8 @@ function onState(m) {
     }
 
     if (Array.isArray(m.tcp)) renderReadout(m.tcp, m.sigma);
-    if (m.frame && m.frame !== cartFrame) { cartFrame = m.frame; viewer.setFrame(cartFrame); renderFrameBars(); }
+    if (m.frame && m.frame !== S.cartFrame) { S.cartFrame = m.frame; viewer.setFrame(m.frame); renderFrameBars(); }
 
-    // Singularity warning, rate limited so it can't spam during a slow approach.
     if (typeof m.sigma === 'number' && m.sigma < 0.02 && Date.now() - lastSigmaWarn > 5000) {
         lastSigmaWarn = Date.now();
         toast(`Near singularity (σmin ${m.sigma.toFixed(4)}) — Cartesian motion may be blocked`, 'warn', 4000);
@@ -124,8 +178,6 @@ function renderReadout(t, sigma) {
 }
 
 // ------------------------------------------------------------ cartesian jog
-// Arrow glyphs: straight for translation, a curved arc for rotation, so the
-// button shows how the TCP will move rather than just "+" / "−".
 function arrowSVG(dir, rot) {
     if (!rot) {
         const p = dir > 0 ? 'M5 12h13M13 7l5 5-5 5' : 'M19 12H6M11 7l-5 5 5 5';
@@ -146,7 +198,7 @@ function bindHold(btn, { onStart, onStop, onTap, onEnter, onLeave }) {
     btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         btn.classList.add('active');
-        const held = jogMode === 'hold';
+        const held = S.jogMode === 'hold';
         if (held) onStart();
         const release = (ev) => {
             window.removeEventListener('pointerup', release);
@@ -165,10 +217,9 @@ function buildCartPad(rootId, axes) {
     root.innerHTML = '';
     axes.forEach(a => {
         const rot = a >= 3;
-        const color = '#' + AXIS_COLORS[a % 3].toString(16).padStart(6, '0');
         const row = document.createElement('div');
         row.className = 'jogrow';
-        row.style.setProperty('--ax', color);
+        row.style.setProperty('--ax', axColor(a));
         row.innerHTML =
             `<span class="lbl">${CART_AXES[a].toUpperCase()}</span>` +
             `<div class="jogbtn" data-cart="${a}:-1">${arrowSVG(-1, rot)}</div>` +
@@ -179,8 +230,8 @@ function buildCartPad(rootId, axes) {
         row.querySelectorAll('[data-cart]').forEach(btn => {
             const [ax, dir] = btn.dataset.cart.split(':').map(Number);
             bindHold(btn, {
-                onStart: () => startCartJog(ax, dir),
-                onStop: () => stopCartJog(ax),
+                onStart: () => { startCartJog(ax, dir); showHud(ax, dir); },
+                onStop: () => { stopCartJog(ax); hideHud(); },
                 onTap: () => stepCartJog(ax, dir),
                 onEnter: () => viewer.highlightAxis(ax),
                 onLeave: () => viewer.highlightAxis(null),
@@ -190,12 +241,12 @@ function buildCartPad(rootId, axes) {
 }
 
 function stepCartJog(a, dir) {
-    const d = a < 3 ? cartLinStep : cartAngStep / rad2deg;
+    const d = a < 3 ? S.cartLinStep : S.cartAngStep / rad2deg;
     cmd(`cartjog ${CART_AXES[a]} ${(dir * d).toFixed(5)}`);
 }
 function sendCartJogVel(a, v) { cmd(`cartjogvel ${CART_AXES[a]} ${v.toFixed(4)}`); }
 function startCartJog(a, dir) {
-    startCartJogVel(a, dir * (a < 3 ? cartLinSpeed : cartAngSpeed / rad2deg));
+    startCartJogVel(a, dir * (a < 3 ? S.cartLinSpeed : S.cartAngSpeed / rad2deg));
 }
 function startCartJogVel(a, v) {
     sendCartJogVel(a, v);
@@ -230,7 +281,7 @@ function buildJoints() {
         const sl = r.querySelector(`#sl${j}`);
         sl.addEventListener('input', () => { sliderBusy[j] = Date.now(); setJoint(j, sl.value); });
         r.querySelector(`#tg${j}`).addEventListener('change', (e) => setJoint(j, e.target.value));
-        r.querySelector(`[data-zero]`).addEventListener('click', () => cmd(`${j + 1} 0`));
+        r.querySelector('[data-zero]').addEventListener('click', () => cmd(`${j + 1} 0`));
         r.querySelectorAll('[data-jog]').forEach(btn => {
             const [jj, dir] = btn.dataset.jog.split(':').map(Number);
             bindHold(btn, {
@@ -242,13 +293,13 @@ function buildJoints() {
     }
 }
 const setJoint = (j, v) => cmd(`${j + 1} ${(+v).toFixed(3)}`);
-function stepJog(j, dir) { cmd(`jog ${j + 1} ${dir * selInc}`); sliderBusy[j] = Date.now(); }
+function stepJog(j, dir) { cmd(`jog ${j + 1} ${dir * S.selInc}`); sliderBusy[j] = Date.now(); }
 function sendJogVel(j, v) { cmd(`jogvel ${j + 1} ${v.toFixed(2)}`); }
 function startJog(j, dir) {
     sliderBusy[j] = Date.now();
-    sendJogVel(j, dir * jogSpeed);
+    sendJogVel(j, dir * S.jogSpeed);
     if (jogTimers[j]) clearInterval(jogTimers[j]);
-    jogTimers[j] = setInterval(() => sendJogVel(j, dir * jogSpeed), JOG_REFRESH_MS);
+    jogTimers[j] = setInterval(() => sendJogVel(j, dir * S.jogSpeed), JOG_REFRESH_MS);
 }
 function stopJog(j) {
     if (!jogTimers[j]) return;
@@ -257,7 +308,7 @@ function stopJog(j) {
 }
 function stopAllJogs() { for (let j = 0; j < NJ; j++) stopJog(j); }
 
-function stopEverything() { stopAllJogs(); stopAllCartJogs(); }
+function stopEverything() { stopAllJogs(); stopAllCartJogs(); hideHud(); }
 window.addEventListener('blur', stopEverything);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopEverything(); });
 
@@ -297,7 +348,7 @@ function applyLimits() {
     toast('Limits applied', 'good');
 }
 
-// ------------------------------------------------------------------ segments
+// ------------------------------------------------------------ segments/tabs
 function segment(el, items, isOn, onPick) {
     el.innerHTML = '';
     items.forEach(([val, label, title]) => {
@@ -310,24 +361,42 @@ function segment(el, items, isOn, onPick) {
     });
 }
 
+function showTab(name) {
+    if (!TABS.some(([v]) => v === name)) name = 'jog';
+    S.tab = name;
+    document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.dataset.pane === name));
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+}
+function buildTabs() {
+    const nav = $('tabs'); nav.innerHTML = '';
+    TABS.forEach(([val, label]) => {
+        const b = document.createElement('button');
+        b.className = 'tab'; b.dataset.tab = val; b.textContent = label;
+        b.onclick = () => showTab(val);
+        nav.appendChild(b);
+    });
+}
+
 function renderModes() {
-    segment($('modeBar'), [['step', 'Step'], ['hold', 'Hold']], v => v === jogMode, v => {
-        stopEverything(); jogMode = v; renderModes();
+    segment($('modeBar'), [['step', 'Step'], ['hold', 'Hold']], v => v === S.jogMode, v => {
+        stopEverything(); S.jogMode = v; renderModes();
     });
 }
 function renderFrameBars() {
     const items = [['base', 'Base'], ['tool', 'Tool']];
-    const pick = v => { stopAllCartJogs(); cartFrame = v; viewer.setFrame(v); cmd(`cartframe ${v}`); renderFrameBars(); };
-    segment($('frameBar'), items, v => v === cartFrame, pick);
-    segment($('frameBarVp'), items, v => v === cartFrame, pick);
+    const pick = v => { stopAllCartJogs(); S.cartFrame = v; viewer.setFrame(v); cmd(`cartframe ${v}`); renderFrameBars(); };
+    segment($('frameBar'), items, v => v === S.cartFrame, pick);
+    segment($('frameBarVp'), items, v => v === S.cartFrame, pick);
+    $('linUnit').textContent = S.cartFrame === 'tool' ? '· tool axes' : '· base axes';
+    $('angUnit').textContent = S.cartFrame === 'tool' ? '· tool axes' : '· base axes';
 }
 function renderIncrements() {
-    segment($('incBar'), (config.increments || []).map(v => [v, v + '°']), v => v === selInc,
-        v => { selInc = v; renderIncrements(); });
+    segment($('incBar'), (config.increments || []).map(v => [v, v + '°']), v => v === S.selInc,
+        v => { S.selInc = v; renderIncrements(); });
     segment($('cartLinIncBar'), [0.001, 0.005, 0.01, 0.05].map(v => [v, `${v * 1000}mm`]),
-        v => v === cartLinStep, v => { cartLinStep = v; renderIncrements(); });
+        v => v === S.cartLinStep, v => { S.cartLinStep = v; renderIncrements(); });
     segment($('cartAngIncBar'), [1, 5, 15, 45].map(v => [v, v + '°']),
-        v => v === cartAngStep, v => { cartAngStep = v; renderIncrements(); });
+        v => v === S.cartAngStep, v => { S.cartAngStep = v; renderIncrements(); });
 }
 function renderViewBar() {
     segment($('viewBar'), [['iso', 'Iso'], ['front', 'Front'], ['side', 'Side'], ['top', 'Top']],
@@ -340,7 +409,7 @@ function togglePlan() {
     if (!viewer.setPlanning(!planning)) { toast('Model still loading', 'warn'); return; }
     planning = !planning;
     $('btnPlan').classList.toggle('on', planning);
-    $('planPanel').style.display = planning ? '' : 'none';
+    $('planCard').hidden = !planning;
     if (planning) { stopEverything(); renderPlanModeBar(); }
 }
 function renderPlanModeBar() {
@@ -360,8 +429,7 @@ function renderPlan(p) {
 }
 function planCmd(verb) {
     if (!planPose || !planPose.reachable) return;
-    const a = [...planPose.pos, ...planPose.rpy].map(v => v.toFixed(5)).join(' ');
-    cmd(`${verb} ${a}`);
+    cmd(`${verb} ${[...planPose.pos, ...planPose.rpy].map(v => v.toFixed(5)).join(' ')}`);
     toast(verb === 'movel' ? 'Straight-line move sent' : 'Joint move sent');
 }
 
@@ -372,7 +440,6 @@ function renderPoses() {
     Object.entries(config.poses).forEach(([name, a]) => {
         const it = document.createElement('div'); it.className = 'item';
         it.innerHTML = `<span class="nm"></span>
-            <span class="mut">${a.map(x => (+x).toFixed(0)).join(', ')}</span>
             <button class="btn sm accent" data-go>Go</button>
             <button class="btn sm bad" data-del>✕</button>`;
         it.querySelector('.nm').textContent = name;               // name is user data: never innerHTML
@@ -417,7 +484,10 @@ const stepsToAngles = (steps) => steps
     .map(s => ({ angles: (config.poses[s.pose] || []).map(Number), dwell: s.dwell }))
     .filter(s => s.angles.length === NJ);
 
-function renderConfig() { renderIncrements(); renderPoses(); renderSeqs(); }
+function renderAll() {
+    renderModes(); renderFrameBars(); renderIncrements();
+    renderPoses(); renderSeqs(); renderSteps(); renderMotors();
+}
 
 // ------------------------------------------------------------------- actions
 const actions = {
@@ -426,8 +496,14 @@ const actions = {
     ready: () => cmd('ready'),
     stop: () => { stopEverything(); cmd('stop'); },
     rehome: () => { if (confirm('Rehome all joints using the limit switches?')) cmd('rehome'); },
-    applyLimits,
-    savePose,
+    applyLimits, savePose, saveSettings, resetSettings,
+    addIncrement: () => {
+        const v = parseFloat($('incCustom').value);
+        if (!isFinite(v) || v <= 0) return;
+        send({ type: 'set_increments', values: [...new Set([...(config.increments || []), v])].sort((a, b) => a - b) });
+        S.selInc = v;
+        $('incCustom').value = '';
+    },
     addStep: () => {
         const pose = $('seqPose').value;
         if (!pose) return;
@@ -447,10 +523,10 @@ document.querySelectorAll('[data-act]').forEach(el => {
     el.addEventListener('click', () => actions[el.dataset.act]?.());
 });
 
-$('btnTrail').onclick = (e) => {
-    const on = !e.currentTarget.classList.contains('on');
-    e.currentTarget.classList.toggle('on', on);
-    viewer.setTrail(on);
+$('btnTrail').onclick = () => {
+    S.trail = !S.trail;
+    $('btnTrail').classList.toggle('on', S.trail);
+    viewer.setTrail(S.trail);
 };
 $('btnTrailClear').onclick = () => viewer.clearTrail();
 $('btnPlan').onclick = togglePlan;
@@ -458,9 +534,9 @@ $('btnPlanGoL').onclick = () => planCmd('movel');
 $('btnPlanGoJ').onclick = () => planCmd('move');
 $('btnPlanReset').onclick = () => viewer.resetPlan();
 
-$('jogSpeed').onchange = (e) => { jogSpeed = +e.target.value || 20; };
-$('cartLinSpeed').onchange = (e) => { cartLinSpeed = +e.target.value || 0.05; };
-$('cartAngSpeed').onchange = (e) => { cartAngSpeed = +e.target.value || 15; };
+$('jogSpeed').onchange = (e) => { S.jogSpeed = +e.target.value || DEFAULTS.jogSpeed; };
+$('cartLinSpeed').onchange = (e) => { S.cartLinSpeed = +e.target.value || DEFAULTS.cartLinSpeed; };
+$('cartAngSpeed').onchange = (e) => { S.cartAngSpeed = +e.target.value || DEFAULTS.cartAngSpeed; };
 
 // Spacebar is a hard stop from anywhere except while typing in a field.
 document.addEventListener('keydown', (e) => {
@@ -473,14 +549,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------- init
+buildTabs();
 buildCartPad('cartLin', [0, 1, 2]);
 buildCartPad('cartAng', [3, 4, 5]);
 buildLimits();
 buildJoints();
-renderMotors();
-renderModes();
-renderFrameBars();
-renderIncrements();
 renderViewBar();
-$('btnTrail').classList.add('on');
+renderAll();
+showTab(S.tab);
 connect();

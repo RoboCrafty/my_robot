@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
 <title>Parol6 Control</title>
 <link rel="stylesheet" href="/static/css/app.css" />
 <script type="importmap">
@@ -19,134 +21,161 @@
 
 <header>
   <h1>Parol6</h1>
-  <button class="btn" data-act="sync" title="Align the planner to motor feedback (no motion)">Sync ↺</button>
-  <button class="btn" data-act="home">Home</button>
-  <button class="btn" data-act="ready">Ready</button>
-  <span class="sep"></span>
-  <button class="btn bad" data-act="rehome">Rehome</button>
-  <button class="btn bad" data-act="stop" title="Spacebar">STOP</button>
+  <div class="hdr-scroll">
+    <button class="btn sm" data-act="sync" title="Align the planner to motor feedback (no motion)">Sync ↺</button>
+    <button class="btn sm" data-act="home">Home</button>
+    <button class="btn sm" data-act="ready">Ready</button>
+    <span class="sep"></span>
+    <button class="btn sm bad" data-act="rehome">Rehome</button>
+  </div>
+  <button class="btn stop" data-act="stop" title="Spacebar">STOP</button>
   <span id="status">connecting…</span>
 </header>
 
-<div class="app">
-  <!-- ============================================================ left -->
-  <div class="col">
-    <section class="panel viewer-card">
-      <div id="viewport">
-        <div id="loadMsg">loading model…</div>
+<div class="shell">
+  <!-- ======================================================= 3D stage -->
+  <section class="stage">
+    <div id="viewport">
+      <div id="loadMsg">loading model…</div>
 
-        <div class="vp-overlay vp-tl">
-          <div class="seg" id="viewBar"></div>
+      <div class="vp vp-tl">
+        <div class="seg" id="viewBar"></div>
+      </div>
+
+      <div class="vp vp-tr">
+        <div class="seg" id="frameBarVp"></div>
+        <button class="btn sm icon" id="btnTrail" title="Draw the path the TCP follows">
+          <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 18c5 0 4-12 9-12s5 8 9 8"/></svg>
+        </button>
+        <button class="btn sm icon" id="btnTrailClear" title="Clear the trail">✕</button>
+        <button class="btn sm" id="btnPlan" title="Drag the TCP to plan a move">Plan</button>
+      </div>
+
+      <div class="vp vp-bl">
+        <div class="readout" id="vpReadout"></div>
+      </div>
+
+      <!-- live speed feedback while an axis is being dragged or held -->
+      <div class="vp vp-bc">
+        <div class="hud" id="jogHud" hidden>
+          <span class="hud-ax" id="hudAx">Z</span>
+          <div class="hud-bar"><div class="hud-fill" id="hudFill"></div></div>
+          <span class="hud-val" id="hudVal">0</span>
+        </div>
+      </div>
+
+      <!-- plan card lives in the viewer so dragging never needs a scroll -->
+      <div class="vp vp-br">
+        <div class="plancard" id="planCard" hidden>
+          <div class="planhead">
+            <div class="seg" id="planModeBar"></div>
+            <span class="badge" id="planReach">—</span>
+          </div>
+          <div class="readout tight" id="planReadout"></div>
+          <div class="planbtns">
+            <button class="btn sm accent" id="btnPlanGoL" title="Straight-line Cartesian move">Move L</button>
+            <button class="btn sm" id="btnPlanGoJ" title="Joint-interpolated move">Move J</button>
+            <button class="btn sm ghost" id="btnPlanReset" title="Snap target back to the live TCP">Reset</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ dock -->
+  <aside class="dock">
+    <nav class="tabs" id="tabs"></nav>
+    <div class="panes">
+
+      <!-- ------------------------------------------------------- jog -->
+      <section class="pane" data-pane="jog">
+        <div class="toolbar">
+          <div class="seg grow" id="modeBar"></div>
+          <div class="seg grow" id="frameBar"></div>
         </div>
 
-        <div class="vp-overlay vp-tr">
-          <div class="seg" id="frameBarVp"></div>
-          <button class="btn sm" id="btnTrail" title="Draw the path the TCP follows">Trail</button>
-          <button class="btn sm" id="btnTrailClear" title="Clear the trail">✕</button>
-          <button class="btn sm" id="btnPlan" title="Drag the TCP to plan a move">Plan</button>
+        <div class="jog-sub">Translate <span id="linUnit" class="mut"></span></div>
+        <div class="jogpad" id="cartLin"></div>
+        <div class="toolbar">
+          <span class="mut">step</span><div class="seg" id="cartLinIncBar"></div>
+          <span style="flex:1"></span>
+          <span class="mut">m/s</span>
+          <input type="number" id="cartLinSpeed" class="num" value="0.05" step="0.01" min="0.001" />
         </div>
 
-        <div class="vp-overlay vp-bl">
-          <div class="readout" id="vpReadout"></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel" id="planPanel" style="display:none">
-      <h2>Planned move
-        <span class="right">
-          <span class="seg" id="planModeBar"></span>
-          <span class="badge" id="planReach">—</span>
-        </span>
-      </h2>
-      <div class="readout" id="planReadout" style="grid-template-columns:auto auto auto auto"></div>
-      <div class="toolbar" style="margin-top:10px">
-        <button class="btn accent" id="btnPlanGoL">▶ Move L (straight)</button>
-        <button class="btn" id="btnPlanGoJ">▶ Move J (joint)</button>
-        <button class="btn ghost" id="btnPlanReset">Reset to current</button>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Poses</h2>
-      <div class="toolbar" style="margin-bottom:10px">
-        <input type="text" id="poseName" placeholder="pose name" style="flex:1;width:auto" />
-        <button class="btn accent" data-act="savePose">Save current</button>
-      </div>
-      <div class="list" id="poseList"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Sequence / playback</h2>
-      <div class="toolbar">
-        <select id="seqPose"></select>
-        <span class="mut">dwell</span>
-        <input type="number" id="seqDwell" class="num" value="1.5" step="0.1" min="0" style="width:60px" />
-        <span class="mut">s</span>
-        <button class="btn sm" data-act="addStep">＋ step</button>
-        <span style="flex:1"></span>
-        <input type="text" id="seqName" placeholder="sequence name" style="width:130px" />
-        <button class="btn sm" data-act="saveSeq">Save</button>
-        <button class="btn sm accent" data-act="play">▶</button>
-        <button class="btn sm bad" data-act="stopPlay">■</button>
-      </div>
-      <div class="list" id="stepList" style="margin-top:8px"></div>
-      <div class="jog-sub">Saved sequences</div>
-      <div class="list" id="seqList"></div>
-    </section>
-  </div>
-
-  <!-- =========================================================== right -->
-  <div class="col">
-    <section class="panel">
-      <h2>Cartesian jog
-        <span class="right">
-          <span class="seg" id="modeBar"></span>
-          <span class="seg" id="frameBar"></span>
-        </span>
-      </h2>
-      <div class="jogpad" id="cartLin"></div>
-      <div class="toolbar" style="margin-top:8px">
-        <span class="mut">step</span><div class="seg" id="cartLinIncBar"></div>
-        <span class="mut">m/s</span>
-        <input type="number" id="cartLinSpeed" class="num" value="0.05" step="0.01" min="0.001" style="width:66px" />
-      </div>
-
-      <div class="jog-sub">Rotate about TCP</div>
-      <div class="jogpad" id="cartAng"></div>
-      <div class="toolbar" style="margin-top:8px">
-        <span class="mut">step</span><div class="seg" id="cartAngIncBar"></div>
-        <span class="mut">°/s</span>
-        <input type="number" id="cartAngSpeed" class="num" value="15" step="1" min="1" style="width:66px" />
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Joints
-        <span class="right">
-          <span class="mut">step</span><span class="seg" id="incBar"></span>
+        <div class="jog-sub">Rotate about TCP <span id="angUnit" class="mut"></span></div>
+        <div class="jogpad" id="cartAng"></div>
+        <div class="toolbar">
+          <span class="mut">step</span><div class="seg" id="cartAngIncBar"></div>
+          <span style="flex:1"></span>
           <span class="mut">°/s</span>
-          <input type="number" id="jogSpeed" class="num" value="20" step="1" min="1" style="width:56px" />
-        </span>
-      </h2>
-      <div id="joints"></div>
-    </section>
+          <input type="number" id="cartAngSpeed" class="num" value="15" step="1" min="1" />
+        </div>
+      </section>
 
-    <section class="panel">
-      <h2>Motor torque</h2>
-      <div class="motorbar" id="motorBar"></div>
-    </section>
+      <!-- ---------------------------------------------------- joints -->
+      <section class="pane" data-pane="joints">
+        <div class="toolbar">
+          <span class="mut">step</span><div class="seg" id="incBar"></div>
+          <span style="flex:1"></span>
+          <span class="mut">°/s</span>
+          <input type="number" id="jogSpeed" class="num" value="20" step="1" min="1" />
+        </div>
+        <div id="joints"></div>
+        <div class="jog-sub">Motor torque</div>
+        <div class="motorbar" id="motorBar"></div>
+      </section>
 
-    <section class="panel">
-      <h2>Motion limits
-        <span class="right"><button class="btn sm accent" data-act="applyLimits">Apply</button></span>
-      </h2>
-      <table>
-        <thead><tr><th>J</th><th>vel °/s</th><th>acc °/s²</th><th>jerk °/s³</th></tr></thead>
-        <tbody id="limitBody"></tbody>
-      </table>
-    </section>
-  </div>
+      <!-- ----------------------------------------------------- poses -->
+      <section class="pane" data-pane="poses">
+        <div class="toolbar">
+          <input type="text" id="poseName" placeholder="pose name" class="grow" />
+          <button class="btn sm accent" data-act="savePose">Save current</button>
+        </div>
+        <div class="list" id="poseList"></div>
+
+        <div class="jog-sub">Sequence</div>
+        <div class="toolbar">
+          <select id="seqPose" class="grow"></select>
+          <input type="number" id="seqDwell" class="num" value="1.5" step="0.1" min="0" title="dwell (s)" />
+          <button class="btn sm" data-act="addStep">＋</button>
+        </div>
+        <div class="list" id="stepList"></div>
+        <div class="toolbar">
+          <input type="text" id="seqName" placeholder="sequence name" class="grow" />
+          <button class="btn sm" data-act="saveSeq">Save</button>
+          <button class="btn sm accent" data-act="play">▶</button>
+          <button class="btn sm bad" data-act="stopPlay">■</button>
+        </div>
+        <div class="jog-sub">Saved sequences</div>
+        <div class="list" id="seqList"></div>
+      </section>
+
+      <!-- ----------------------------------------------------- setup -->
+      <section class="pane" data-pane="setup">
+        <div class="jog-sub">Motion limits</div>
+        <table>
+          <thead><tr><th>J</th><th>vel °/s</th><th>acc °/s²</th><th>jerk °/s³</th></tr></thead>
+          <tbody id="limitBody"></tbody>
+        </table>
+        <div class="toolbar"><button class="btn sm accent" data-act="applyLimits">Apply limits</button></div>
+
+        <div class="jog-sub">Joint step presets</div>
+        <div class="toolbar">
+          <input type="number" id="incCustom" class="num" placeholder="deg" step="1" />
+          <button class="btn sm" data-act="addIncrement">＋ preset</button>
+        </div>
+
+        <div class="jog-sub">Preferences</div>
+        <p class="mut hint">Saves the current jog mode, frame, speeds and step sizes to <code>poses.json</code> so they come back on the next load.</p>
+        <div class="toolbar">
+          <button class="btn sm accent" data-act="saveSettings">Save settings</button>
+          <button class="btn sm ghost" data-act="resetSettings">Reset to defaults</button>
+        </div>
+      </section>
+
+    </div>
+  </aside>
 </div>
 
 <div id="toasts"></div>

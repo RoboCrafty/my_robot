@@ -32,10 +32,11 @@ play_task: asyncio.Task | None = None
 def load_cfg() -> dict:
     if CFG_FILE.exists():
         try:
-            return json.loads(CFG_FILE.read_text())
+            return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {},
+                    **json.loads(CFG_FILE.read_text())}
         except Exception:
             pass
-    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20]}
+    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {}}
 
 
 def save_cfg() -> None:
@@ -155,6 +156,11 @@ async def ws_endpoint(ws: WebSocket):
 
             elif t == "set_increments":
                 cfg["increments"] = m["values"]
+                save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
+
+            elif t == "save_settings":
+                # UI preferences (jog mode, frame, speeds, step sizes).
+                cfg["settings"] = m["values"]
                 save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
 
             elif t == "play":

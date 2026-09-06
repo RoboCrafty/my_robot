@@ -181,7 +181,7 @@ export class RobotViewer {
         const size = box.getSize(new THREE.Vector3());
         box.getCenter(this._focus = new THREE.Vector3());
         const radius = Math.max(size.x, size.y, size.z) * 0.5;
-        this._fitDist = radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov) * 0.5) * 1.45;
+        this._fitDist = radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov) * 0.5) * 1.15;
         this.orbit.target.copy(this._focus);
         this.orbit.minDistance = radius * 0.4;
         this.orbit.maxDistance = radius * 20;
@@ -271,7 +271,8 @@ export class RobotViewer {
         this.scene.add(g);
         this._handleMeshes = [];
 
-        const L = 0.062, R = 0.045;
+        // Rings sit outside the arrow tips; overlapping them makes picking ambiguous.
+        const L = 0.055, R = 0.082;
         for (let a = 0; a < 3; a++) {
             const mat = new THREE.MeshBasicMaterial({
                 color: AXIS_COLORS[a], depthTest: false, transparent: true, opacity: 0.95,
@@ -334,6 +335,19 @@ export class RobotViewer {
             const base = h.userData.kind === 'rot' ? 0.55 : 0.95;
             h.userData.mat.opacity = axis == null ? base : (on ? 1.0 : base * 0.25);
             h.scale.setScalar(on ? 1.12 : 1.0);
+        }
+    }
+
+    // Grow the handle with the commanded rate, so a short drag visibly reads as a
+    // slow move and a long one as fast -- the 2D speed bar alone is easy to miss
+    // while your eyes are on the arm.
+    _showDragRate(axis, rate) {
+        const mag = Math.min(1, Math.abs(rate));
+        for (const h of this._handleMeshes) {
+            if (h.userData.axis !== axis) continue;
+            if (h.userData.kind === 'lin') h.scale.set(1, 1 + mag * 0.9, 1);   // local Y is the shaft
+            else h.scale.setScalar(1 + mag * 0.3);
+            h.userData.mat.opacity = 0.55 + 0.45 * mag;
         }
     }
 
@@ -418,6 +432,7 @@ export class RobotViewer {
         const rate = Math.max(-1, Math.min(1, px / DRAG_FULL_SCALE_PX));
         if (Math.abs(rate - d.last) < 0.02) return;
         d.last = rate;
+        this._showDragRate(d.axis, rate);
         this.onDragJog(d.axis, rate);
     }
 
