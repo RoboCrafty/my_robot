@@ -114,6 +114,9 @@ void setup() {
     homeAxis(4);
     homeAxis(6);
     homeAxis(5);
+    delay(3000);
+    steppers[5]->setCurrentPosition(0);
+    steppers[5]->moveTo(85*Constants::Config::J6_STEPS_PER_DEG);
     delay(3000); // Wait for homing to complete
 
 
