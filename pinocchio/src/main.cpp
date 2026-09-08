@@ -139,6 +139,7 @@ static std::atomic<bool>        g_monitor{false};   // live one-line telemetry o
 static std::atomic<bool>        g_stats{false};     // loop/serial counters on/off
 static std::atomic<bool>        g_sim{false};       // drive SimEsp instead of the serial link
 static std::atomic<bool>        g_serial_ok{false}; // a real port is open, so 'sim off' is possible
+static std::atomic<bool>        g_radio{true};      // ESP32 WiFi/ESP-NOW radio enable
 static int                      g_sim_request = -1; // -1 none, 0 off, 1 on; guarded by g_mtx
 
 // Per-joint motion limits (deg/s, deg/s^2, deg/s^3). Editable live via the
@@ -276,6 +277,7 @@ static const char* HELP_TEXT =
     "  sync                align planner to motor feedback without motion\n"
     "  sim <on|off>        run against the built-in ESP32 simulator\n"
     "  gripper <0..140>    set the parallel gripper servo angle\n"
+    "  radio <on|off>      ESP32 WiFi radio; off while moving to A/B stepper noise\n"
     "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
     "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
     "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
@@ -319,8 +321,12 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
-    if (tok[0] == "gripper") {
-        if (tok.size() != 2) return "usage: gripper <0..140>";
+    if (tok[0] == "radio") {
+        if (tok.size() != 2 || (tok[1] != "on" && tok[1] != "off")) return "usage: radio <on|off>";
+        g_radio = (tok[1] == "on");
+        return g_radio ? "radio ON" : "radio OFF (gripper unreachable)";
+    }
+    if (tok[0] == "gripper") {        if (tok.size() != 2) return "usage: gripper <0..140>";
         try {
             int v = std::stoi(tok[1]);
             if (v < 0 || v > GRIPPER_POS_MAX) return "value must be 0..140";
@@ -786,6 +792,7 @@ int main(int argc, char** argv) {
     // Per-second counters for the optional concise `stats` output.
     struct timespec t_prev = next_tick, t_now;
     long   loop_count = 0, tx_count = 0, rx_count = 0;
+    uint32_t underruns_prev = 0;
     double stats_window_us = 0;
 
     // Cartesian state, owned exclusively by this loop.
@@ -833,9 +840,12 @@ int main(int argc, char** argv) {
         loop_count++; stats_window_us += dt_us;
         if (stats_window_us >= 1e6) {
             if (g_stats.load()) {
-                std::fprintf(stderr, "[stats] loop %.0f Hz  serial writes %ld/s  ESP replies %ld/s\n",
-                    loop_count / (stats_window_us / 1e6), tx_count, rx_count);
+                std::fprintf(stderr, "[stats] loop %.0f Hz  serial writes %ld/s  ESP replies %ld/s"
+                    "  step-queue underruns %u (+%u/s)\n",
+                    loop_count / (stats_window_us / 1e6), tx_count, rx_count,
+                    rx_packet.underruns, rx_packet.underruns - underruns_prev);
             }
+            underruns_prev = rx_packet.underruns;
             loop_count = 0; tx_count = 0; rx_count = 0; stats_window_us = 0;
         }
 
@@ -1188,6 +1198,7 @@ int main(int argc, char** argv) {
                         tx_packet.pos_cmd[i] = g_rehome_hold ? 0.0f : output.new_position[i];
                         tx_packet.vel_cmd[i] = g_rehome_hold ? 0.0f : output.new_velocity[i];
         }
+        tx_packet.flags = g_radio.load() ? 0 : FLAG_RADIO_OFF;
                 { std::lock_guard<std::mutex> lk(g_mtx);
                     tx_packet.motor_enable_mask = g_motor_enable_mask
                         | (g_rehome_request ? FLAG_REHOME : 0)

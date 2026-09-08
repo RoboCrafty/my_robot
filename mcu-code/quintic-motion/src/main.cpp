@@ -94,7 +94,10 @@ void setup() {
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
-    engine.init();
+    // Pin to core 1. The default init() leaves StepperTask unpinned, so once the
+    // WiFi driver exists FreeRTOS can schedule it on core 0 against the radio;
+    // a late queue refill leaves a gap in the pulse train and the motors whine.
+    engine.init(1);
     for (int i = 0; i < 6; i++) {
         steppers[i] = engine.stepperConnectToPin(STEP_PINS[i]);
         if (steppers[i]) {
@@ -126,8 +129,7 @@ void setup() {
         steppers[i]->setCurrentPosition(0);
     }
 
-    Gripper::begin();   // non-fatal: motion still works if the gripper is absent
-
+    Gripper::start();   // owns the radio on core 0; absent gripper is non-fatal
     last_loop_time = millis();
 }
 
@@ -148,9 +150,10 @@ void onPacket(const uint8_t* buffer, size_t size) {
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
 
-    // Records the target only; the ESP-NOW frame goes out from loop() so the
-    // radio never delays this reply.
+    // Records the target only; the ESP-NOW frame goes out from the core-0 task
+    // so the radio never delays this reply.
     Gripper::setTarget(rx_packet.gripper_pos);
+    Gripper::radio_wanted = !(rx_packet.flags & FLAG_RADIO_OFF);
 
     uint8_t requested_mask = rx_packet.motor_enable_mask & 0x3f;
     uint8_t changed_mask = requested_mask ^ applied_motor_enable_mask;
@@ -278,6 +281,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
         tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
     }
     tx_packet.gripper_pos = Gripper::applied;
+    tx_packet.underruns = movetimed_underruns;
     uint8_t payload[sizeof(EspToPiPacket) + 2];
     memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
     uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));
@@ -292,8 +296,6 @@ void loop() {
 
     // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
     packetSerial.update();
-
-    Gripper::service();   // transmits only when the target changed
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
