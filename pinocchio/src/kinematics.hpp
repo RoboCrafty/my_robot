@@ -85,8 +85,22 @@ class Kinematics{
     // Public Functions
     Kinematics()
     {
-        pinocchio::urdf::buildModel(PAROL_URDF_PATH, model_);
+        pinocchio::Model full_model;
+        pinocchio::urdf::buildModel(PAROL_URDF_PATH, full_model);
+
+        // Strip the extra 2 joints 
+        std::vector<pinocchio::JointIndex> joints_to_lock;
+        if (full_model.existJointName("left_jaw_joint")) {
+            joints_to_lock.push_back(full_model.getJointId("left_jaw_joint"));
+        }
+        if (full_model.existJointName("right_jaw_joint")) {
+            joints_to_lock.push_back(full_model.getJointId("right_jaw_joint"));
+        }
+
+        Eigen::VectorXd q_ref = pinocchio::neutral(full_model);
+        pinocchio::buildReducedModel(full_model, joints_to_lock, q_ref, model_);
         data_ = pinocchio::Data(model_);
+        
         nq = model_.nq;
         nv = model_.nv;
         J_.resize(6, model_.nv);

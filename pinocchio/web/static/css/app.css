@@ -1,0 +1,286 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #141922;
+  --sunken: #0d1017;
+  --line: #262f3d;
+  --line-2: #323d4e;
+  --fg: #e6eaf0;
+  --mut: #7d889a;
+  --accent: #4c8bf5;
+  --good: #37c871;
+  --warn: #f5a623;
+  --bad: #e5484d;
+  --ax-x: #e5484d;
+  --ax-y: #37c871;
+  --ax-z: #4c8bf5;
+  --r: 9px;
+  --hdr: 46px;
+  --dock: 400px;
+}
+
+* { box-sizing: border-box; }
+
+/* Kill the iOS long-press selection/callout on every control. Text that the
+   user may legitimately want to copy opts back in via .selectable. */
+html, body, .btn, .jogbtn, .seg, .tab, .jogrow, header, .hud, .readout, canvas {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+input, textarea, select, .selectable { -webkit-user-select: text; user-select: text; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font: 13px/1.45 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;                 /* the dock scrolls, the page never does */
+  overscroll-behavior: none;
+  touch-action: manipulation;       /* no double-tap zoom */
+}
+
+/* ------------------------------------------------------------------ header */
+header {
+  height: var(--hdr); flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px;
+  padding-left: max(10px, env(safe-area-inset-left));
+  padding-right: max(10px, env(safe-area-inset-right));
+  background: linear-gradient(180deg, #171d27, #131820);
+  border-bottom: 1px solid var(--line);
+}
+header h1 { font-size: 14px; margin: 0 4px 0 0; font-weight: 650; white-space: nowrap; flex: none; }
+/* Only the secondary actions scroll; STOP must never be pushed off-screen. */
+.hdr-scroll {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.hdr-scroll::-webkit-scrollbar { display: none; }
+header .sep { width: 1px; height: 18px; background: var(--line-2); margin: 0 2px; flex: none; }
+header .btn { flex: none; }
+.btn.stop { flex: none; background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; letter-spacing: .04em; }
+.btn.sim { flex: none; font-weight: 700; letter-spacing: .04em; }
+.btn.sim.on { background: var(--warn); border-color: var(--warn); color: #221a05; }
+.btn.sim[hidden] { display: none; }
+/* Unmissable reminder that nothing on screen is touching the real arm. */
+body.simulating .stage { box-shadow: inset 0 0 0 2px var(--warn); }
+#status {
+  padding-left: 10px; font-size: 11.5px; color: var(--mut);
+  display: flex; align-items: center; gap: 6px; white-space: nowrap; flex: none;
+}
+#status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--mut); flex: none; }
+#status.ok::before { background: var(--good); box-shadow: 0 0 8px var(--good); }
+#status.err::before { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+/* Narrow screens keep the indicator dot but drop the wording. */
+@media (max-width: 700px) { #status { font-size: 0; gap: 0; padding-left: 8px; } }
+
+/* ------------------------------------------------------------------- shell */
+.shell {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 1fr var(--dock);
+}
+.stage { position: relative; min-width: 0; min-height: 0; }
+#viewport { position: absolute; inset: 0; touch-action: none; }
+#viewport canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+.dock {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel); border-left: 1px solid var(--line);
+}
+.tabs { display: flex; flex: none; border-bottom: 1px solid var(--line); }
+.tab {
+  flex: 1; padding: 10px 4px; text-align: center; cursor: pointer;
+  font-size: 12px; font-weight: 550; color: var(--mut);
+  background: none; border: none; border-bottom: 2px solid transparent;
+  font-family: inherit;
+}
+.tab.on { color: var(--fg); border-bottom-color: var(--accent); background: #171d27; }
+.panes {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 10px 12px calc(14px + env(safe-area-inset-bottom));
+  overscroll-behavior: contain;
+}
+.pane { display: none; }
+.pane.on { display: block; }
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; grid-template-rows: minmax(200px, 40vh) 1fr; }
+  .dock { border-left: none; border-top: 1px solid var(--line); }
+  .tab { padding: 12px 4px; }
+}
+
+/* ------------------------------------------------------------------ inputs */
+.btn {
+  background: #212a36; color: var(--fg);
+  border: 1px solid var(--line-2); border-radius: 7px;
+  padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12.5px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  transition: background .12s, border-color .12s;
+  touch-action: none; white-space: nowrap;
+}
+.btn:hover { background: #2a3543; border-color: #46566d; }
+.btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.bad { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 5px 9px; font-size: 12px; }
+.btn.icon { padding: 5px 7px; }
+.btn.icon svg { stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+.btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.seg { display: inline-flex; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg.grow { flex: 1; }
+.seg.grow .btn { flex: 1; }
+.seg .btn { border: none; background: transparent; padding: 5px 10px; border-radius: 6px; }
+.seg .btn.on { background: var(--accent); }
+
+input[type=number], input[type=text], select {
+  background: var(--sunken); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; font: inherit; font-size: 16px; width: 76px;   /* 16px: iOS won't zoom on focus */
+}
+@media (min-width: 901px) { input[type=number], input[type=text], select { font-size: 12.5px; } }
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+input.grow, select.grow { flex: 1; width: auto; min-width: 0; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mut { color: var(--mut); }
+.hint { font-size: 11.5px; margin: 0 0 8px; line-height: 1.5; }
+code { background: var(--sunken); padding: 1px 4px; border-radius: 4px; font-size: 11px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+.jog-sub {
+  font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--mut); margin: 14px 0 6px; font-weight: 600;
+}
+.pane > .jog-sub:first-child { margin-top: 2px; }
+
+/* --------------------------------------------------------- viewer overlays */
+.vp { position: absolute; display: flex; gap: 6px; flex-wrap: wrap; pointer-events: none; z-index: 2; }
+.vp > * { pointer-events: auto; }
+.vp-tl { top: 10px; left: 10px; }
+.vp-tr { top: 10px; right: 10px; justify-content: flex-end; }
+.vp-bl { bottom: 10px; left: 10px; }
+.vp-br { bottom: 10px; right: 10px; }
+.vp-bc { bottom: 10px; left: 50%; transform: translateX(-50%); }
+.vp .btn, .vp .seg, .readout, .hud, .plancard {
+  background: rgba(17, 22, 30, .88); backdrop-filter: blur(10px);
+}
+.vp .seg .btn { background: transparent; }
+.vp .seg .btn.on { background: var(--accent); }
+
+.readout {
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; font-variant-numeric: tabular-nums; font-size: 11.5px;
+  display: grid; grid-template-columns: auto auto; gap: 1px 12px;
+}
+.readout.tight { grid-template-columns: auto auto auto auto; font-size: 11px; }
+.readout b { font-weight: 600; color: var(--mut); font-size: 10px; letter-spacing: .05em; }
+.readout .v { text-align: right; }
+
+#loadMsg { position: absolute; inset: 0; display: grid; place-items: center; background: var(--sunken); color: var(--mut); z-index: 3; }
+
+/* --------------------------------------------------------------- speed HUD */
+.hud {
+  display: flex; align-items: center; gap: 9px;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  padding: 6px 12px; font-variant-numeric: tabular-nums;
+}
+.hud[hidden] { display: none; }
+.hud-ax { font-weight: 700; font-size: 12px; color: var(--ax); min-width: 20px; text-align: center; }
+.hud-bar { position: relative; width: 150px; height: 6px; background: #222b38; border-radius: 3px; }
+/* zero marker: the bar is bidirectional, filling out from the centre */
+.hud-bar::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--line-2); }
+.hud-fill { position: absolute; top: 0; bottom: 0; left: 50%; width: 0; background: var(--ax); border-radius: 3px; transition: width .05s linear, left .05s linear; }
+.hud-val { font-size: 11.5px; color: var(--fg); min-width: 76px; text-align: right; }
+
+/* -------------------------------------------------------------- plan card */
+.plancard { border: 1px solid var(--line-2); border-radius: 10px; padding: 9px; display: grid; gap: 8px; width: 268px; }
+.plancard[hidden] { display: none; }
+.planhead { display: flex; align-items: center; gap: 8px; }
+.planhead .seg { flex: 1; background: var(--sunken); }
+.planhead .seg .btn { flex: 1; }
+.planbtns { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
+
+/* ------------------------------------------------------- cartesian jog pad */
+.jogpad { display: grid; gap: 6px; }
+.jogrow {
+  display: grid; grid-template-columns: 26px 1fr auto 1fr; align-items: center; gap: 6px;
+  background: var(--sunken); border: 1px solid var(--line);
+  border-left: 3px solid var(--ax); border-radius: 8px; padding: 4px 6px 4px 8px;
+}
+.jogrow .lbl { font-weight: 700; font-size: 12px; color: var(--ax); }
+.jogrow .val { font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--mut); min-width: 76px; text-align: center; }
+.jogbtn {
+  display: flex; align-items: center; justify-content: center;
+  height: 40px; border-radius: 7px;
+  background: #1f2733; border: 1px solid var(--line-2);
+  cursor: pointer; touch-action: none;
+  transition: background .1s, border-color .1s;
+}
+.jogbtn:hover { background: #2b3746; border-color: var(--ax); }
+.jogbtn.active { background: var(--ax); border-color: var(--ax); }
+.jogbtn.active svg { stroke: #fff; }
+.jogbtn svg { stroke: var(--ax); fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 900px) { .jogbtn { height: 46px; } }
+
+/* ------------------------------------------------------------------ joints */
+.jrow { display: grid; grid-template-columns: 24px 34px 1fr 34px 64px 54px 26px; align-items: center; gap: 5px; margin-bottom: 5px; }
+.jrow .jname { color: var(--mut); font-weight: 700; font-size: 12px; }
+.jrow .act { text-align: right; color: var(--good); font-variant-numeric: tabular-nums; font-size: 12px; }
+.jrow .btn { padding: 7px 0; }
+.jrow input[type=range] { width: 100%; min-width: 40px; accent-color: var(--accent); touch-action: none; }
+.jrow input[type=number] { width: 100%; padding: 5px 4px; font-size: 12px; }
+
+.motorbar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+.motorbar .btn { padding: 7px 0; font-size: 12px; }
+.motorbar .btn.off { color: var(--mut); }
+
+/* ------------------------------------------------------------------ tables */
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--line); font-size: 12px; }
+th { color: var(--mut); font-weight: 500; font-size: 11px; }
+td input { width: 100%; padding: 4px 5px; font-size: 12px; }
+
+.list { display: flex; flex-direction: column; gap: 5px; }
+.item {
+  display: flex; align-items: center; gap: 7px;
+  background: var(--sunken); border: 1px solid var(--line);
+  border-radius: 7px; padding: 5px 8px;
+}
+.item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list:empty::after { content: "nothing saved yet"; color: var(--mut); font-size: 11.5px; padding: 4px 2px; }
+
+/* ------------------------------------------------------------------ toasts */
+#toasts {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column-reverse; gap: 8px; z-index: 50; align-items: center;
+  pointer-events: none;
+}
+.toast {
+  background: #1a2029; border: 1px solid var(--line-2); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 9px 14px; font-size: 12.5px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5); animation: pop .18s ease-out; max-width: 80vw;
+}
+.toast.warn { border-left-color: var(--warn); }
+.toast.bad { border-left-color: var(--bad); }
+.toast.good { border-left-color: var(--good); }
+@keyframes pop { from { opacity: 0; transform: translateY(8px); } }
+
+.badge { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--mut); white-space: nowrap; }
+.badge.good { color: var(--good); border-color: #205e3c; }
+.badge.warn { color: var(--warn); border-color: #6b4b12; }
+.badge.bad { color: var(--bad); border-color: #6d2326; }
+
+/* Small screens: the plan card and readout compete for space -- drop the
+   readout, which the dock already duplicates, and move the view presets into
+   the space it frees so they stop colliding with the frame toggle. */
+@media (max-width: 620px) {
+  .vp-bl { display: none; }
+  .vp-tl { top: auto; bottom: 10px; }
+  .vp-bc { bottom: 54px; }
+  .plancard { width: 232px; }
+  .hud-bar { width: 96px; }
+}

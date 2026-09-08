@@ -10,17 +10,19 @@ Deps: pip install fastapi "uvicorn[standard]"
 """
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 HERE = Path(__file__).parent
 CFG_FILE = HERE / "poses.json"
+STATIC_DIR = HERE / "static"
+ASSETS_DIR = HERE.parent / "src" / "assets"   # parol6.urdf + meshes/, shared with the C++ side
 ESP_ADDR = ("127.0.0.1", 5005)   # where parolController listens (arg 2)
-
-app = FastAPI()
 
 clients: set[WebSocket] = set()
 udp_transport: asyncio.DatagramTransport | None = None
@@ -30,10 +32,11 @@ play_task: asyncio.Task | None = None
 def load_cfg() -> dict:
     if CFG_FILE.exists():
         try:
-            return json.loads(CFG_FILE.read_text())
+            return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {},
+                    **json.loads(CFG_FILE.read_text())}
         except Exception:
             pass
-    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20]}
+    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {}}
 
 
 def save_cfg() -> None:
@@ -72,11 +75,11 @@ class StateProto(asyncio.DatagramProtocol):
         asyncio.create_task(broadcast(json.dumps({"type": "state", **state})))
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     global udp_transport
     loop = asyncio.get_running_loop()
-    udp_transport, _ = await loop.create_datagram_endpoint(
+    udp_transport, _proto = await loop.create_datagram_endpoint(
         StateProto, remote_addr=ESP_ADDR
     )
 
@@ -86,12 +89,26 @@ async def _startup() -> None:
             send_cmd("ping")
             await asyncio.sleep(1.0)
 
-    asyncio.create_task(keepalive())
+    task = asyncio.create_task(keepalive())
+    try:
+        yield
+    finally:
+        task.cancel()
+        udp_transport.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
 async def index():
-    return FileResponse(HERE / "static" / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+# The 3D viewer fetches the same URDF the controller runs on, so the model on
+# screen can never drift from the model doing the kinematics.
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 async def run_playback(steps: list[dict]) -> None:
@@ -139,6 +156,11 @@ async def ws_endpoint(ws: WebSocket):
 
             elif t == "set_increments":
                 cfg["increments"] = m["values"]
+                save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
+
+            elif t == "save_settings":
+                # UI preferences (jog mode, frame, speeds, step sizes).
+                cfg["settings"] = m["values"]
                 save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
 
             elif t == "play":
