@@ -35,6 +35,15 @@
 
 #define SERIAL_PORT "/dev/ttyUSB1"
 
+// Basename of the URDF this build is using, published to the web UI so the
+// 3D viewer always loads the same model the kinematics runs on.
+static const char* urdfBasename() {
+    const char* p = PAROL_URDF_PATH;
+    const char* slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+#define URDF_BASENAME urdfBasename()
+
 // Reads framed bytes from `serial` until a CRC-valid EspToPiPacket arrives or
 // the timeout elapses. Returns true on success. Recovers from desync/corruption.
 static bool readFramedPacket(serialib& serial, FrameReader<EspToPiPacket>& reader,
@@ -80,6 +89,7 @@ static constexpr double LOOP_DT = 0.002;           // 500 Hz control period
 struct SimEsp {
     float   pos[6] = {0};
     uint8_t homing_sequence = 0;
+    uint8_t gripper_pos = 0;
     int     rehome_ticks = -1;
 
     void step(const PiToEspPacket& tx, EspToPiPacket& rx) {
@@ -88,6 +98,8 @@ struct SimEsp {
         // sees the same timing it will on the bench.
         memcpy(rx.actual_position, pos, sizeof(pos));
         rx.homing_sequence = homing_sequence;
+        rx.gripper_pos = gripper_pos;
+        gripper_pos = tx.gripper_pos;   // the slave has no travel time we model
 
         if (tx.motor_enable_mask & FLAG_REHOME) rehome_ticks = 500; // ~1 s of "homing"
         if (rehome_ticks > 0) {
@@ -142,6 +154,11 @@ static bool   g_rehome_request = false;    // guarded by g_mtx
 static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
+
+// Parallel gripper servo angle, relayed to a second ESP32 over ESP-NOW. The
+// controller only carries the raw 0..GRIPPER_POS_MAX value; named grip presets
+// are task metadata and live in the web app's poses.json.
+static uint8_t g_gripper_pos = 0;         // guarded by g_mtx
 
 // Cartesian "move" (non-linear): IK a target pose to joint angles, then let the
 // joint-space Ruckig get there. Pose is [x y z rx ry rz] in metres/radians
@@ -258,6 +275,7 @@ static const char* HELP_TEXT =
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
     "  sim <on|off>        run against the built-in ESP32 simulator\n"
+    "  gripper <0..140>    set the parallel gripper servo angle\n"
     "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
     "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
     "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
@@ -301,6 +319,16 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
+    if (tok[0] == "gripper") {
+        if (tok.size() != 2) return "usage: gripper <0..140>";
+        try {
+            int v = std::stoi(tok[1]);
+            if (v < 0 || v > GRIPPER_POS_MAX) return "value must be 0..140";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_gripper_pos = (uint8_t)v;
+            return "gripper " + std::to_string(v);
+        } catch (const std::exception&) { return "bad number"; }
+    }
     if (tok[0] == "sim") {
         if (tok.size() != 2 || (tok[1] != "on" && tok[1] != "off")) return "usage: sim <on|off>";
         bool want = (tok[1] == "on");
@@ -1164,6 +1192,7 @@ int main(int argc, char** argv) {
                     tx_packet.motor_enable_mask = g_motor_enable_mask
                         | (g_rehome_request ? FLAG_REHOME : 0)
                         | (g_sync_request   ? FLAG_SYNC   : 0);
+                    tx_packet.gripper_pos = g_gripper_pos;
                     g_rehome_request = false;
                     g_sync_request = false; }
         output.pass_to_input(input);
@@ -1224,23 +1253,24 @@ int main(int argc, char** argv) {
             bool have; sockaddr_in cli;
             { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
             if (have) {
-                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame;
+                                double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame; uint8_t grip_cmd;
                 { std::lock_guard<std::mutex> lk(g_mtx);
                                     for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; }
-                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; }
+                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; grip_cmd = g_gripper_pos; }
                 // Live TCP pose: FK of the actual joint feedback (deg -> rad).
                 Eigen::VectorXd q_fb(DOFs);
                 for (int i = 0; i < DOFs; i++) q_fb[i] = rx_packet.actual_position[i] * D2R;
                 Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
                 // Refresh the gauge from feedback while idle; the servo path keeps it live.
                 if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
-                char sb[896];
+                char sb[928];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
                     "\"frame\":\"%s\","
                     "\"sim\":%s,\"can_sim_off\":%s,"
+                    "\"grip\":%u,\"grip_ack\":%u,\"urdf\":\"%s\","
                     "\"sigma\":%.5f,"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -1253,6 +1283,7 @@ int main(int argc, char** argv) {
                     cart_frame == 1 ? "tool" : "base",
                     simulating ? "true" : "false",
                     g_serial_ok.load() ? "true" : "false",
+                    (unsigned)grip_cmd, (unsigned)rx_packet.gripper_pos, URDF_BASENAME,
                     last_sigma_min,
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],
                     am[0],am[1],am[2],am[3],am[4],am[5],

@@ -9,6 +9,7 @@
 #include <BasicLinearAlgebra.h>
 #include <helper_functions.h>
 #include <structs.h>
+#include <gripper.h>
 #include <PacketSerial.h>
 // #include <motion_planner.h>
 
@@ -125,6 +126,7 @@ void setup() {
         steppers[i]->setCurrentPosition(0);
     }
 
+    Gripper::begin();   // non-fatal: motion still works if the gripper is absent
 
     last_loop_time = millis();
 }
@@ -145,6 +147,10 @@ void onPacket(const uint8_t* buffer, size_t size) {
     if (crc != rx) return;                                     // corrupt -> ignore
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
+
+    // Records the target only; the ESP-NOW frame goes out from loop() so the
+    // radio never delays this reply.
+    Gripper::setTarget(rx_packet.gripper_pos);
 
     uint8_t requested_mask = rx_packet.motor_enable_mask & 0x3f;
     uint8_t changed_mask = requested_mask ^ applied_motor_enable_mask;
@@ -271,6 +277,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
     for (int i = 0; i < 6; i++) {
         tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
     }
+    tx_packet.gripper_pos = Gripper::applied;
     uint8_t payload[sizeof(EspToPiPacket) + 2];
     memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
     uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));
@@ -285,6 +292,8 @@ void loop() {
 
     // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
     packetSerial.update();
+
+    Gripper::service();   // transmits only when the target changed
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
