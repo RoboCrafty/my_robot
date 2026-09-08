@@ -95,6 +95,23 @@
           <div class="seg grow" id="frameBar"></div>
         </div>
 
+        <div class="jog-sub">Gripper <span id="gripAck" class="badge"></span></div>
+        <div class="grip">
+          <div class="gripbtns">
+            <button class="btn" id="btnGripOpen">Open</button>
+            <button class="btn accent" id="btnGripClose">Close</button>
+          </div>
+          <div class="griprow">
+            <input type="range" id="gripSlider" min="0" max="140" step="1" value="0" />
+            <span class="val" id="gripVal">0</span>
+          </div>
+          <div class="seg grow" id="gripPresetBar"></div>
+          <div class="toolbar">
+            <input type="text" id="gripName" placeholder="object name" class="grow" />
+            <button class="btn sm" data-act="saveGrip" title="Save the current slider value as this preset's closed position">Teach close</button>
+          </div>
+        </div>
+
         <div class="jog-sub">Translate <span id="linUnit" class="mut"></span></div>
         <div class="jogpad" id="cartLin"></div>
         <div class="toolbar">

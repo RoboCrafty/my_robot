@@ -14,6 +14,9 @@ import URDFLoader from 'urdf-loader';
 import { ChainIK } from './ik.js';
 
 export const JOINT_NAMES = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6'];
+// Parallel-gripper jaws, if this URDF has them. They are locked out of the
+// controller's Pinocchio model, so the viewer drives them purely for display.
+const JAW_JOINTS = ['left_jaw_joint', 'right_jaw_joint'];
 export const AXIS_COLORS = [0xe5484d, 0x37c871, 0x4c8bf5];
 const TIP_LINK = 'tcp_link';
 const DRAG_FULL_SCALE_PX = 120;   // pixels of drag that map to 100% jog speed
@@ -194,6 +197,20 @@ export class RobotViewer {
             const l = this.robot.joints[n].limit;
             return { lower: (l?.lower ?? -Math.PI) * 180 / Math.PI, upper: (l?.upper ?? Math.PI) * 180 / Math.PI };
         });
+    }
+
+    /** Show the jaws for a 0..max servo angle. Display only -- no kinematics. */
+    setGripper(pos, max = 140) {
+        if (!this.robot) return;
+        const f = Math.max(0, Math.min(1, pos / max));
+        for (const n of JAW_JOINTS) {
+            const j = this.robot.joints[n];
+            if (!j) continue;
+            const lo = j.limit?.lower ?? 0, hi = j.limit?.upper ?? 0;
+            // Servo at 0 = open = whichever stop is furthest from centre.
+            j.setJointValue(Math.abs(lo) > Math.abs(hi) ? lo * (1 - f) : hi * (1 - f));
+        }
+        this.robot.updateMatrixWorld(true);
     }
 
     /** @param {number[]} deg live joint feedback, degrees */
