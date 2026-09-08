@@ -227,5 +227,24 @@
     10,
     20,
     50
-  ]
+  ],
+  "settings": {
+    "jogMode": "step",
+    "cartFrame": "base",
+    "jogSpeed": 20,
+    "cartLinSpeed": 0.131,
+    "cartAngSpeed": 60,
+    "selInc": 10,
+    "cartLinStep": 0.01,
+    "cartAngStep": 45,
+    "trail": false,
+    "tab": "setup",
+    "grip": "default"
+  },
+  "grips": {
+    "default": {
+      "open": 0,
+      "close": 126
+    }
+  }
 }

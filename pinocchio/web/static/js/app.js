@@ -13,16 +13,18 @@ const DEFAULTS = {
     jogMode: 'hold', cartFrame: 'base',
     jogSpeed: 20, cartLinSpeed: 0.05, cartAngSpeed: 15,
     selInc: 10, cartLinStep: 0.01, cartAngStep: 5,
-    trail: true, tab: 'jog',
+    trail: true, tab: 'jog', grip: 'default',
 };
 let S = { ...DEFAULTS };
+const GRIP_MAX = 140;
+const DEFAULT_GRIP = { open: 0, close: GRIP_MAX };
 
 let state = {
     pos: Array(NJ).fill(0), tgt: Array(NJ).fill(0), tcp: Array(6).fill(0),
     vmax: Array(NJ).fill(0), amax: Array(NJ).fill(0), jmax: Array(NJ).fill(0),
     enabled: Array(NJ).fill(1), sigma: 1, frame: 'base',
 };
-let config = { poses: {}, sequences: {}, increments: [5, 10, 20], settings: {} };
+let config = { poses: {}, sequences: {}, increments: [5, 10, 20], settings: {}, grips: {} };
 let jointLimits = null;
 let curSteps = [];
 const sliderBusy = Array(NJ).fill(0);
@@ -59,7 +61,7 @@ function toast(msg, kind = '', ms = 3000) {
 
 // ------------------------------------------------------------------ settings
 function onConfig(m) {
-    config = { increments: [5, 10, 20], settings: {}, ...m };
+    config = { increments: [5, 10, 20], settings: {}, grips: {}, ...m };
     S = { ...DEFAULTS, ...(config.settings || {}) };
     applySettings();
     renderAll();
@@ -97,15 +99,24 @@ const viewer = new RobotViewer($('viewport'), {
 
 window.parol = { viewer };   // debug handle: inspect frames from the browser console
 
-viewer.load('/assets/parol6-PGripper.urdf').then(() => {
-    $('loadMsg').remove();
-    jointLimits = viewer.jointLimits();
-    buildJoints();
-    viewer.setFrame(S.cartFrame);
-}).catch(err => {
-    $('loadMsg').textContent = 'failed to load model: ' + err;
-    console.error(err);
-});
+// The controller reports which URDF it was built against, so the viewer can
+// never end up showing a different model than the kinematics is solving.
+let urdfLoaded = null;
+function loadModel(name) {
+    if (urdfLoaded === name) return;
+    urdfLoaded = name;
+    viewer.load(`/assets/${name}`).then(() => {
+        const msg = $('loadMsg');
+        if (msg) msg.remove();
+        jointLimits = viewer.jointLimits();
+        buildJoints();
+        viewer.setFrame(S.cartFrame);
+    }).catch(err => {
+        const msg = $('loadMsg');
+        if (msg) msg.textContent = 'failed to load model: ' + err;
+        console.error(err);
+    });
+}
 
 // A drag on a TCP handle produces a -1..1 rate; scale it by the same speed the
 // on-screen jog buttons use so both paths feel identical.
@@ -138,6 +149,7 @@ function hideHud() { $('jogHud').hidden = true; }
 let lastSigmaWarn = 0;
 function onState(m) {
     state = { ...state, ...m, enabled: Array.isArray(m.enabled) ? m.enabled : state.enabled };
+    if (m.urdf) loadModel(m.urdf);
     viewer.setJoints(m.pos);
 
     for (let j = 0; j < NJ; j++) {
@@ -153,6 +165,7 @@ function onState(m) {
     if (Array.isArray(m.tcp)) renderReadout(m.tcp, m.sigma);
     if (m.frame && m.frame !== S.cartFrame) { S.cartFrame = m.frame; viewer.setFrame(m.frame); renderFrameBars(); }
     if (typeof m.sim === 'boolean') renderSim(m.sim, m.can_sim_off !== false);
+    if (typeof m.grip === 'number') renderGrip(m.grip, m.grip_ack);
 
     if (typeof m.sigma === 'number' && m.sigma < 0.02 && Date.now() - lastSigmaWarn > 5000) {
         lastSigmaWarn = Date.now();
@@ -330,9 +343,57 @@ function stopEverything() { stopAllJogs(); stopAllCartJogs(); hideHud(); }
 window.addEventListener('blur', stopEverything);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopEverything(); });
 
+// ------------------------------------------------------------------ gripper
+// The controller only knows raw 0..140. Named presets ("how far to close for
+// THIS part") are task metadata and live in poses.json with the poses.
+const grip = () => config.grips?.[S.grip] || DEFAULT_GRIP;
+let gripBusy = 0;
+
+function sendGrip(v) {
+    v = Math.max(0, Math.min(GRIP_MAX, Math.round(v)));
+    gripBusy = Date.now();
+    $('gripSlider').value = v;
+    $('gripVal').textContent = v;
+    cmd(`gripper ${v}`);
+}
+
+function renderGrip(cmdPos, ackPos) {
+    viewer.setGripper(typeof ackPos === 'number' ? ackPos : cmdPos, GRIP_MAX);
+    if (Date.now() - gripBusy > 700) {
+        $('gripSlider').value = cmdPos;
+        $('gripVal').textContent = cmdPos;
+    }
+    const el = $('gripAck');
+    if (typeof ackPos !== 'number') { el.textContent = ''; el.className = 'badge'; return; }
+    // The ESP echoes what ESP-NOW actually delivered; a lasting mismatch means
+    // the gripper ESP is unreachable, not just mid-travel.
+    const ok = ackPos === cmdPos;
+    el.textContent = ok ? `at ${ackPos}` : `sending ${cmdPos}\u2192`;
+    el.className = 'badge ' + (ok ? 'good' : 'warn');
+}
+
+function renderGrips() {
+    const names = Object.keys(config.grips || {});
+    if (!names.includes(S.grip)) S.grip = names[0] || 'default';
+    segment($('gripPresetBar'), names.length ? names.map(n => [n, n]) : [['default', 'default']],
+        v => v === S.grip, v => { S.grip = v; renderGrips(); });
+    const g = grip();
+    $('btnGripOpen').title = `open to ${g.open}`;
+    $('btnGripClose').title = `close to ${g.close}`;
+}
+
+function saveGrip() {
+    const name = $('gripName').value.trim() || S.grip;
+    if (!name) return;
+    // Whatever the slider is at right now IS the taught closing point.
+    send({ type: 'save_grip', name, open: grip().open, close: +$('gripSlider').value });
+    S.grip = name;
+    $('gripName').value = '';
+    toast(`Grip "${name}" closes at ${$('gripSlider').value}`, 'good');
+}
+
 // ------------------------------------------------------------------- motors
-function renderMotors() {
-    const bar = $('motorBar'); bar.innerHTML = '';
+function renderMotors() {    const bar = $('motorBar'); bar.innerHTML = '';
     for (let j = 0; j < NJ; j++) {
         const on = !!state.enabled[j];
         const b = document.createElement('button');
@@ -504,7 +565,7 @@ const stepsToAngles = (steps) => steps
 
 function renderAll() {
     renderModes(); renderFrameBars(); renderIncrements();
-    renderPoses(); renderSeqs(); renderSteps(); renderMotors();
+    renderPoses(); renderSeqs(); renderSteps(); renderMotors(); renderGrips();
 }
 
 // ------------------------------------------------------------------- actions
@@ -514,7 +575,7 @@ const actions = {
     ready: () => cmd('ready'),
     stop: () => { stopEverything(); cmd('stop'); },
     rehome: () => { if (confirm('Rehome all joints using the limit switches?')) cmd('rehome'); },
-    applyLimits, savePose, saveSettings, resetSettings,
+    applyLimits, savePose, saveSettings, resetSettings, saveGrip,
     addIncrement: () => {
         const v = parseFloat($('incCustom').value);
         if (!isFinite(v) || v <= 0) return;
@@ -557,8 +618,11 @@ $('btnPlanGoL').onclick = () => planCmd('movel');
 $('btnPlanGoJ').onclick = () => planCmd('move');
 $('btnPlanReset').onclick = () => viewer.resetPlan();
 
-$('jogSpeed').onchange = (e) => { S.jogSpeed = +e.target.value || DEFAULTS.jogSpeed; };
-$('cartLinSpeed').onchange = (e) => { S.cartLinSpeed = +e.target.value || DEFAULTS.cartLinSpeed; };
+$('btnGripOpen').onclick = () => sendGrip(grip().open);
+$('btnGripClose').onclick = () => sendGrip(grip().close);
+$('gripSlider').oninput = (e) => sendGrip(+e.target.value);
+
+$('jogSpeed').onchange = (e) => { S.jogSpeed = +e.target.value || DEFAULTS.jogSpeed; };$('cartLinSpeed').onchange = (e) => { S.cartLinSpeed = +e.target.value || DEFAULTS.cartLinSpeed; };
 $('cartAngSpeed').onchange = (e) => { S.cartAngSpeed = +e.target.value || DEFAULTS.cartAngSpeed; };
 
 // Spacebar is a hard stop from anywhere except while typing in a field.

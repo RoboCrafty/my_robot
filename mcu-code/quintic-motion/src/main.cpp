@@ -9,6 +9,7 @@
 #include <BasicLinearAlgebra.h>
 #include <helper_functions.h>
 #include <structs.h>
+#include <gripper.h>
 #include <PacketSerial.h>
 // #include <motion_planner.h>
 
@@ -93,7 +94,10 @@ void setup() {
     initLimitSwitches();
 
     // --- FastAccelStepper engine + per-axis setup ---
-    engine.init();
+    // Pin to core 1. The default init() leaves StepperTask unpinned, so once the
+    // WiFi driver exists FreeRTOS can schedule it on core 0 against the radio;
+    // a late queue refill leaves a gap in the pulse train and the motors whine.
+    engine.init(1);
     for (int i = 0; i < 6; i++) {
         steppers[i] = engine.stepperConnectToPin(STEP_PINS[i]);
         if (steppers[i]) {
@@ -116,7 +120,7 @@ void setup() {
     homeAxis(5);
     delay(3000);
     steppers[5]->setCurrentPosition(0);
-    steppers[5]->moveTo(85*Constants::Config::J6_STEPS_PER_DEG);
+    steppers[5]->moveTo((85-180)*Constants::Config::J6_STEPS_PER_DEG);
     delay(3000); // Wait for homing to complete
 
 
@@ -125,7 +129,7 @@ void setup() {
         steppers[i]->setCurrentPosition(0);
     }
 
-
+    Gripper::start();   // owns the radio on core 0; absent gripper is non-fatal
     last_loop_time = millis();
 }
 
@@ -145,6 +149,11 @@ void onPacket(const uint8_t* buffer, size_t size) {
     if (crc != rx) return;                                     // corrupt -> ignore
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
+
+    // Records the target only; the ESP-NOW frame goes out from the core-0 task
+    // so the radio never delays this reply.
+    Gripper::setTarget(rx_packet.gripper_pos);
+    Gripper::radio_wanted = !(rx_packet.flags & FLAG_RADIO_OFF);
 
     uint8_t requested_mask = rx_packet.motor_enable_mask & 0x3f;
     uint8_t changed_mask = requested_mask ^ applied_motor_enable_mask;
@@ -271,6 +280,8 @@ void onPacket(const uint8_t* buffer, size_t size) {
     for (int i = 0; i < 6; i++) {
         tx_packet.actual_position[i] = steppers[i]->getCurrentPosition() / STEPS_PER_DEG[i];
     }
+    tx_packet.gripper_pos = Gripper::applied;
+    tx_packet.underruns = movetimed_underruns;
     uint8_t payload[sizeof(EspToPiPacket) + 2];
     memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
     uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));

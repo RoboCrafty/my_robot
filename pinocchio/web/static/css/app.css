@@ -204,6 +204,20 @@ code { background: var(--sunken); padding: 1px 4px; border-radius: 4px; font-siz
 .planhead .seg .btn { flex: 1; }
 .planbtns { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
 
+/* ----------------------------------------------------------------- gripper */
+.grip { display: grid; gap: 7px; }
+.gripbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.gripbtns .btn { padding: 10px 0; font-weight: 600; }
+.griprow {
+  display: flex; align-items: center; gap: 9px;
+  background: var(--sunken); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px;
+}
+.griprow input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); touch-action: none; }
+.griprow .val { font-variant-numeric: tabular-nums; font-size: 12px; min-width: 30px; text-align: right; }
+#gripPresetBar { flex-wrap: wrap; }
+#gripAck { margin-left: auto; }
+
 /* ------------------------------------------------------- cartesian jog pad */
 .jogpad { display: grid; gap: 6px; }
 .jogrow {

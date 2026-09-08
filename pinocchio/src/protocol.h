@@ -20,6 +20,8 @@
 struct EspToPiPacket {
     float actual_position[6]; // 24 bytes
     uint8_t homing_sequence;  // Increments after each completed rehome
+    uint8_t gripper_pos;      // Last value the ESP-NOW link actually delivered
+    uint32_t underruns;       // Cumulative step-queue-empty events (motion roughness)
 };
 
 struct PiToEspPacket {
@@ -27,10 +29,14 @@ struct PiToEspPacket {
     float vel_cmd[6];         // Commanded velocity, deg/s (24 bytes)
     uint8_t motor_enable_mask;// Bits 0..5: J1..J6 enabled; bit 6: rehome; bit 7: sync
     uint8_t flags;            // FLAG_HOLD: report position, skip motion
+    uint8_t gripper_pos;      // Servo angle 0..140; forwarded over ESP-NOW on change
 };
 #pragma pack(pop)
 
+static const uint8_t GRIPPER_POS_MAX = 140;
+
 static const uint8_t FLAG_HOLD   = 0x01;
+static const uint8_t FLAG_RADIO_OFF = 0x02;  // stop the WiFi/ESP-NOW radio
 static const uint8_t FLAG_REHOME = 0x40;
 static const uint8_t FLAG_SYNC   = 0x80;
 

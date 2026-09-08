@@ -33,10 +33,10 @@ def load_cfg() -> dict:
     if CFG_FILE.exists():
         try:
             return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {},
-                    **json.loads(CFG_FILE.read_text())}
+                    "grips": {}, **json.loads(CFG_FILE.read_text())}
         except Exception:
             pass
-    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {}}
+    return {"poses": {}, "sequences": {}, "increments": [5, 10, 20], "settings": {}, "grips": {}}
 
 
 def save_cfg() -> None:
@@ -161,6 +161,15 @@ async def ws_endpoint(ws: WebSocket):
             elif t == "save_settings":
                 # UI preferences (jog mode, frame, speeds, step sizes).
                 cfg["settings"] = m["values"]
+                save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
+
+            elif t == "save_grip":
+                # Per-object grip: how far to close for that part, taught by hand.
+                cfg["grips"][m["name"]] = {"open": int(m["open"]), "close": int(m["close"])}
+                save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
+
+            elif t == "delete_grip":
+                cfg["grips"].pop(m["name"], None)
                 save_cfg(); await broadcast(json.dumps({"type": "config", **cfg}))
 
             elif t == "play":
