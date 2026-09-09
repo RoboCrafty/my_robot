@@ -161,6 +161,7 @@ static double g_speed_scale      = 1.0;   // guarded by g_mtx
 static bool   g_stop_request     = false; // guarded by g_mtx
 static uint8_t g_motor_enable_mask = 0x3f; // bits 0..5: J1..J6, guarded by g_mtx
 static bool   g_rehome_request = false;    // guarded by g_mtx
+static int    g_rehome_joint = 0;          // 0 = all six, 1..6 = one joint; guarded by g_mtx
 static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
@@ -281,7 +282,8 @@ static const char* HELP_TEXT =
     "                      must be refreshed within 200ms or it auto-stops\n"
     "  home                all joints to 0\n"
     "  ready               go to the singularity-free ready pose\n"
-    "  rehome              run the ESP32 limit-switch homing sequence\n"
+    "  rehome              run the ESP32 limit-switch homing sequence (all joints)\n"
+    "  rehome <1..6>       home just that joint (homing J5 also re-homes J6 first)\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
     "  sim <on|off>        run against the built-in ESP32 simulator\n"
@@ -452,13 +454,29 @@ static std::string handleCommand(const std::string& line) {
         } catch (const std::exception&) { return "bad number"; }
     }
     if (tok[0] == "rehome") {
+        // "rehome" alone re-homes all six joints (unchanged behaviour); "rehome
+        // <j>" re-homes just that one. J5's limit switch can only be reached
+        // with J6 in its homed position, so the firmware re-homes J6 first
+        // whenever J5 is requested alone -- the caller doesn't need to know that.
+        int j = 0;
+        if (tok.size() == 2) {
+            try { j = std::stoi(tok[1]); } catch (const std::exception&) { return "usage: rehome [1..6]"; }
+            if (j < 1 || j > DOFs) return "joint must be 1..6";
+        } else if (tok.size() != 1) {
+            return "usage: rehome [1..6]";
+        }
         std::lock_guard<std::mutex> lk(g_mtx);
-        g_motor_enable_mask = 0x3f;
-        g_target.fill(0.0);
-        g_have_new = true;
+        if (j == 0) {
+            g_motor_enable_mask = 0x3f;
+        } else {
+            uint8_t bits = (uint8_t)(1u << (j - 1));
+            if (j == 5) bits |= (uint8_t)(1u << 5);   // J5 homing re-homes J6 too
+            g_motor_enable_mask |= bits;
+        }
+        g_rehome_joint = j;
         g_rehome_request = true;
         clearJogLocked();
-        return "rehoming";
+        return j == 0 ? "rehoming all joints" : ("rehoming J" + std::to_string(j));
     }
 
     if (tok[0] == "trackerr") {
@@ -536,8 +554,15 @@ static std::string handleCommand(const std::string& line) {
                 bits = (uint8_t)(1u << (j - 1));
             } catch (const std::exception&) { return "joint must be 1..6"; }
         }
-        if (tok[2] == "on") g_motor_enable_mask |= bits;
-        else g_motor_enable_mask &= (uint8_t)~bits;
+        if (tok[2] == "on") {
+            // A disabled joint has no holding torque, so it may have been moved
+            // by hand in the meantime. Re-enabling must adopt real feedback as
+            // the planner state first, or it would snap back to a stale target.
+            if (bits & ~g_motor_enable_mask) g_sync_request = true;
+            g_motor_enable_mask |= bits;
+        } else {
+            g_motor_enable_mask &= (uint8_t)~bits;
+        }
         return "motor torque updated";
     }
 
@@ -836,6 +861,7 @@ int main(int argc, char** argv) {
 
     // Cartesian state, owned exclusively by this loop.
     Mode mode = Mode::Joint;
+    uint8_t rehome_mask = 0x3F; // which axes the in-flight rehome affects; set when it starts
     Ruckig<1> ruck_s(0.002);            // jerk-limited scalar path parameter s in [0,1]
     InputParameter<1> in_s; in_s.synchronization = Synchronization::Time;
     OutputParameter<1> out_s;
@@ -983,13 +1009,20 @@ int main(int argc, char** argv) {
                 mode = Mode::Joint;
                 input.control_interface = ControlInterface::Position;
                 input.synchronization   = Synchronization::Time;
+                // Only the joint(s) actually being re-homed get zeroed; the rest
+                // must keep holding their real position, or a single-joint rehome
+                // would yank every other axis to 0 out from under the user.
+                rehome_mask = (g_rehome_joint == 0) ? 0x3Fu
+                            : (uint8_t)((1u << (g_rehome_joint - 1)) | (g_rehome_joint == 5 ? (1u << 5) : 0));
                 for (int i = 0; i < DOFs; i++) {
+                    if (!(rehome_mask & (1u << i))) continue;
                     input.current_position[i] = 0.0;
                     input.current_velocity[i] = 0.0;
                     input.current_acceleration[i] = 0.0;
                     input.target_position[i] = 0.0;
                     input.target_velocity[i] = 0.0;
                     input.target_acceleration[i] = 0.0;
+                    g_target[i] = 0.0;
                 }
                 g_rehome_hold = true;
                 g_rehome_completion = (uint8_t)(rx_packet.homing_sequence + 1);
@@ -1251,8 +1284,9 @@ int main(int argc, char** argv) {
         // --- STREAM POSITION + VELOCITY for the ESP moveTimed feeder ---
         // Position pins the step count (drift-free); velocity sets the step rate.
         for(int i = 0; i < DOFs; i++) {
-                        tx_packet.pos_cmd[i] = g_rehome_hold ? 0.0f : output.new_position[i];
-                        tx_packet.vel_cmd[i] = g_rehome_hold ? 0.0f : output.new_velocity[i];
+                        bool axis_rehoming = g_rehome_hold && (rehome_mask & (1u << i));
+                        tx_packet.pos_cmd[i] = axis_rehoming ? 0.0f : output.new_position[i];
+                        tx_packet.vel_cmd[i] = axis_rehoming ? 0.0f : output.new_velocity[i];
         }
         tx_packet.flags = g_radio.load() ? 0 : FLAG_RADIO_OFF;
                 { std::lock_guard<std::mutex> lk(g_mtx);
@@ -1260,6 +1294,8 @@ int main(int argc, char** argv) {
                         | (g_rehome_request ? FLAG_REHOME : 0)
                         | (g_sync_request   ? FLAG_SYNC   : 0);
                     tx_packet.gripper_pos = g_gripper_pos;
+                    if (g_rehome_request)
+                        tx_packet.flags |= (uint8_t)((g_rehome_joint & 0x7) << REHOME_JOINT_SHIFT);
                     g_rehome_request = false;
                     g_sync_request = false; }
         output.pass_to_input(input);

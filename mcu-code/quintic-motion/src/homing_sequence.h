@@ -36,6 +36,10 @@ namespace Constants{
         constexpr int16_t J4_HOMED_POSITION = 143 * Constants::Config::J4_STEPS_PER_DEG;
         constexpr int16_t J5_HOMED_POSITION = -123 * Constants::Config::J5_STEPS_PER_DEG;
         constexpr int16_t J6_HOMED_POSITION = (285-360) * Constants::Config::J6_STEPS_PER_DEG;
+        // J6_HOMED_POSITION is only where J5's limit switch flag lines up -- not
+        // J6's real resting angle. Once J5 is done with it, J6 makes one more
+        // move of this size (from that alignment point) to reach true home.
+        constexpr int16_t J6_POST_J5_OFFSET = (85-180) * Constants::Config::J6_STEPS_PER_DEG;
     }
     
 
@@ -140,4 +144,53 @@ inline void homeAxis(uint8_t joint)
         case 6: homeAxis(steppers[5], 6, Constants::Config::J6_HOMING_DIR, Constants::Config::J6_HOMING_SPEED, Constants::Config::J6_HOMED_POSITION, Constants::Config::J6_STEPS_PER_DEG); break;
         default: Serial.println("Invalid joint number for homing."); break;
     }
+}
+
+// Restores the normal moveTimed operating speed/accel that setup() configures.
+// homeAxis() runs its approach at a per-joint homing speed and never restores
+// it, so without this every axis stays capped at its last homing speed for
+// every subsequent move -- the likely cause of motion feeling rough/uneven
+// after a rehome.
+inline void restoreNormalMotion(uint8_t joint)
+{
+    FastAccelStepper* s = steppers[joint - 1];
+    s->setAcceleration(6000);
+    s->setSpeedInHz(6000);
+    s->applySpeedAcceleration();
+}
+
+// J6 only needs to SIT at J6_HOMED_POSITION while J5's switch is being found;
+// its real home is one more move away from there. Shared by the full sequence
+// and the per-joint path so the two can't drift apart (see J6_POST_J5_OFFSET).
+inline void finishJ6Home()
+{
+    steppers[5]->setCurrentPosition(0);
+    steppers[5]->moveTo(Constants::Config::J6_POST_J5_OFFSET);
+    while (steppers[5]->isRunning()) {}
+}
+
+// Homes ONE joint for the web UI's per-joint "home Jx" command. J5's limit
+// switch can only be reached with J6 parked at its alignment position (the arm
+// hardware, not software, requires this), so a solo J5 home always re-homes
+// J6 first -- the same order the full sequence below already uses. Homing J6
+// alone still needs its own extra move to reach true home (see finishJ6Home).
+inline void homeJointWithDependency(uint8_t joint)
+{
+    if (joint == 5) {
+        homeAxis(6);
+        while (steppers[5]->isRunning()) {}          // homeAxis()'s final approach is async
+        homeAxis(5);
+        while (steppers[4]->isRunning()) {}
+        finishJ6Home();
+        steppers[5]->forceStopAndNewPosition(0);
+        steppers[4]->forceStopAndNewPosition(0);
+        restoreNormalMotion(6);
+        restoreNormalMotion(5);
+        return;
+    }
+    homeAxis(joint);
+    while (steppers[joint - 1]->isRunning()) {}
+    if (joint == 6) finishJ6Home();
+    steppers[joint - 1]->forceStopAndNewPosition(0);
+    restoreNormalMotion(joint);
 }

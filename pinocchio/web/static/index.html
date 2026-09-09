@@ -199,6 +199,12 @@
 
       <!-- ----------------------------------------------------- setup -->
       <section class="pane" data-pane="setup">
+        <div class="jog-sub">Homing</div>
+        <p class="mut hint">Re-homes just that joint using its limit switch. Homing J5 also
+          re-homes J6 first — the arm's own mechanics require J6 in its homed position for
+          J5's switch to be reachable, so this happens automatically.</p>
+        <div class="seg wrap" id="jointHomeBar"></div>
+
         <div class="jog-sub">Motion limits</div>
         <table>
           <thead><tr><th>J</th><th>vel °/s</th><th>acc °/s²</th><th>jerk °/s³</th></tr></thead>

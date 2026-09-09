@@ -119,15 +119,13 @@ void setup() {
     homeAxis(6);
     homeAxis(5);
     delay(3000);
-    steppers[5]->setCurrentPosition(0);
-    steppers[5]->moveTo((85-180)*Constants::Config::J6_STEPS_PER_DEG);
-    delay(3000); // Wait for homing to complete
-
-
+    finishJ6Home();
 
     for (int i = 0; i < 6; i++) {
         steppers[i]->setCurrentPosition(0);
     }
+    for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+    while (Serial.available()) Serial.read();   // discard anything queued during the blocking homing above
 
     Gripper::start();   // owns the radio on core 0; absent gripper is non-fatal
     last_loop_time = millis();
@@ -172,18 +170,29 @@ void onPacket(const uint8_t* buffer, size_t size) {
     applied_motor_enable_mask = requested_mask;
 
     if (rx_packet.motor_enable_mask & FLAG_REHOME) {
-        homeAxis(1);
-        homeAxis(2);
-        homeAxis(3);
-        homeAxis(4);
-        homeAxis(6);
-        homeAxis(5);
-        delay(3000);
-        for (int i = 0; i < 6; i++) {
-            steppers[i]->forceStopAndNewPosition(0);
-            queued_steps[i] = 0;
-            tick_error[i] = 0;
+        uint8_t joint = (rx_packet.flags & REHOME_JOINT_MASK) >> REHOME_JOINT_SHIFT; // 0 = all six
+        if (joint == 0) {
+            homeAxis(1);
+            homeAxis(2);
+            homeAxis(3);
+            homeAxis(4);
+            homeAxis(6);
+            homeAxis(5);
+            delay(3000);
+            finishJ6Home();   // J6's alignment stop for J5 isn't its real home -- see homing_sequence.h
+            for (int i = 0; i < 6; i++) {
+                steppers[i]->forceStopAndNewPosition(0);
+                queued_steps[i] = 0;
+                tick_error[i] = 0;
+            }
+            for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+        } else if (joint <= 6) {
+            homeJointWithDependency(joint);              // also re-homes J6 first if joint == 5
+            queued_steps[joint - 1] = 0;
+            tick_error[joint - 1] = 0;
+            if (joint == 5) { queued_steps[5] = 0; tick_error[5] = 0; }
         }
+        while (Serial.available()) Serial.read();   // discard anything queued during the blocking homing above
         tx_packet.homing_sequence++;
     }
 

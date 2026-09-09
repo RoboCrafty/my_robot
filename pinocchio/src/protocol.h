@@ -37,6 +37,11 @@ static const uint8_t GRIPPER_POS_MAX = 140;
 
 static const uint8_t FLAG_HOLD   = 0x01;
 static const uint8_t FLAG_RADIO_OFF = 0x02;  // stop the WiFi/ESP-NOW radio
+// Bits 2-4 of `flags`: which joint a rehome targets (0 = all six, existing
+// behaviour; 1..6 = that joint only). Packed into the spare flag bits instead
+// of growing the packet, since both copies of this struct must stay identical.
+static const uint8_t REHOME_JOINT_SHIFT = 2;
+static const uint8_t REHOME_JOINT_MASK  = 0x1C;
 static const uint8_t FLAG_REHOME = 0x40;
 static const uint8_t FLAG_SYNC   = 0x80;
 

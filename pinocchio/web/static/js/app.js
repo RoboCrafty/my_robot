@@ -411,16 +411,31 @@ function saveGrip() {
 }
 
 // ------------------------------------------------------------------- motors
-function renderMotors() {    const bar = $('motorBar'); bar.innerHTML = '';
+function renderMotors() {
+    const bar = $('motorBar'); bar.innerHTML = '';
     for (let j = 0; j < NJ; j++) {
         const on = !!state.enabled[j];
         const b = document.createElement('button');
         b.className = 'btn' + (on ? ' accent' : ' off');
         b.textContent = `J${j + 1}`;
-        b.title = on ? 'torque on' : 'torque off';
+        b.title = on ? 'torque on — click to disable' : 'torque off — click to enable';
         b.onclick = () => cmd(`motor ${j + 1} ${on ? 'off' : 'on'}`);
         bar.appendChild(b);
+
+        // Torque off means the driver has no holding force, so jogging it from
+        // here would just be a command into the void -- grey the controls out
+        // instead of leaving them silently do nothing.
+        [`sl${j}`, `tg${j}`].forEach(id => { const el = $(id); if (el) el.disabled = !on; });
+        document.querySelectorAll(`[data-jog="${j}:-1"],[data-jog="${j}:1"],[data-zero="${j}"]`)
+            .forEach(el => el.classList.toggle('disabled', !on));
     }
+}
+
+function renderJointHomeBar() {
+    segment($('jointHomeBar'),
+        Array.from({ length: NJ }, (_, j) => [j + 1, `J${j + 1}`]),
+        () => false,
+        (j) => { if (confirm(`Re-home J${j} using its limit switch?`)) cmd(`rehome ${j}`); });
 }
 
 // -------------------------------------------------------------------- limits
@@ -995,6 +1010,7 @@ buildCartPad('cartLin', [0, 1, 2]);
 buildCartPad('cartAng', [3, 4, 5]);
 buildLimits();
 buildJoints();
+renderJointHomeBar();
 renderViewBar();
 renderAll();
 showTab(S.tab);

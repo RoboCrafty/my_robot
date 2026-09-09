@@ -252,6 +252,10 @@ code { background: var(--sunken); padding: 1px 4px; border-radius: 4px; font-siz
 .motorbar .btn { padding: 7px 0; font-size: 12px; }
 .motorbar .btn.off { color: var(--mut); }
 
+/* Torque-off joints: controls that would otherwise silently do nothing. */
+.jogbtn.disabled { opacity: .3; pointer-events: none; }
+button.disabled  { opacity: .3; pointer-events: none; }
+
 /* ------------------------------------------------------------------ tables */
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--line); font-size: 12px; }
