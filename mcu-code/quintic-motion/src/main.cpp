@@ -112,14 +112,7 @@ void setup() {
         }
     }
 
-    homeAxis(1);
-    homeAxis(2);
-    homeAxis(3);
-    homeAxis(4);
-    homeAxis(6);
-    homeAxis(5);
-    delay(3000);
-    finishJ6Home();
+    homeAllAxes();
 
     for (int i = 0; i < 6; i++) {
         steppers[i]->setCurrentPosition(0);
@@ -172,20 +165,12 @@ void onPacket(const uint8_t* buffer, size_t size) {
     if (rx_packet.motor_enable_mask & FLAG_REHOME) {
         uint8_t joint = (rx_packet.flags & REHOME_JOINT_MASK) >> REHOME_JOINT_SHIFT; // 0 = all six
         if (joint == 0) {
-            homeAxis(1);
-            homeAxis(2);
-            homeAxis(3);
-            homeAxis(4);
-            homeAxis(6);
-            homeAxis(5);
-            delay(3000);
-            finishJ6Home();   // J6's alignment stop for J5 isn't its real home -- see homing_sequence.h
+            homeAllAxes();
             for (int i = 0; i < 6; i++) {
                 steppers[i]->forceStopAndNewPosition(0);
                 queued_steps[i] = 0;
                 tick_error[i] = 0;
             }
-            for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
         } else if (joint <= 6) {
             homeJointWithDependency(joint);              // also re-homes J6 first if joint == 5
             queued_steps[joint - 1] = 0;

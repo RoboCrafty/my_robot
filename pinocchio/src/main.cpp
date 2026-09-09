@@ -1307,17 +1307,33 @@ int main(int argc, char** argv) {
             tx_count++; rx_count++;
             if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
                 g_rehome_hold = false;
+                // Adopt what the ESP actually reports rather than assuming a
+                // clean zero: if any homing move was cut short, believing zero
+                // would leave every later target offset by that error.
+                { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; }
                 std::cout << "Rehome complete\n";
             }
         } else {
-            serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
-            tx_count++;
+            // The ESP blocks inside its packet handler for the whole homing run
+            // (tens of seconds). Streaming at 500 Hz into that would queue tens
+            // of thousands of stale frames in the OS/UART buffers, and the ESP
+            // would then have to chew through all of them before it saw a live
+            // command -- motion that lags reality by seconds. Throttle to ~2 Hz
+            // while holding, but never skip the frame that carries FLAG_REHOME.
+            static int hold_div = 0;
+            const bool carries_rehome = (tx_packet.motor_enable_mask & FLAG_REHOME) != 0;
+            if (!g_rehome_hold || carries_rehome || (++hold_div % 250) == 0) {
+                serial.writeBytes(txbuf, frameEncode(tx_packet, txbuf));
+                tx_count++;
+            }
 
             // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
             if (readFramedPacket(serial, rx_reader, rx_packet, 1)) {
                 rx_count++;
                 if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
                     g_rehome_hold = false;
+                    serial.flushReceiver();   // drop anything buffered during the blocking homing
+                    { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; }
                     std::cout << "Rehome complete\n";
                 }
             }

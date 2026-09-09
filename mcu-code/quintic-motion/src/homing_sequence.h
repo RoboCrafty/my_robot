@@ -159,6 +159,20 @@ inline void restoreNormalMotion(uint8_t joint)
     s->applySpeedAcceleration();
 }
 
+// homeAxis() returns once its final moveTo() is QUEUED, not once the axis has
+// arrived -- so anything sequencing on it must wait explicitly. The old fixed
+// delay(3000) was a guess, and J5's 123-degree return alone runs at 1000 Hz,
+// which takes far longer than that; truncating it with forceStopAndNewPosition
+// then declares the WRONG physical angle to be zero.
+inline void waitUntilIdle(uint8_t joint)
+{
+    while (steppers[joint - 1]->isRunning()) {}
+}
+inline void waitAllIdle()
+{
+    for (int i = 0; i < 6; i++) while (steppers[i]->isRunning()) {}
+}
+
 // J6 only needs to SIT at J6_HOMED_POSITION while J5's switch is being found;
 // its real home is one more move away from there. Shared by the full sequence
 // and the per-joint path so the two can't drift apart (see J6_POST_J5_OFFSET).
@@ -166,21 +180,39 @@ inline void finishJ6Home()
 {
     steppers[5]->setCurrentPosition(0);
     steppers[5]->moveTo(Constants::Config::J6_POST_J5_OFFSET);
-    while (steppers[5]->isRunning()) {}
+    waitUntilIdle(6);
+}
+
+// The full six-axis sequence, shared by boot and the runtime rehome command so
+// the two cannot drift apart. Leaves every axis stopped at its homed angle;
+// the caller decides how to re-zero the counters.
+inline void homeAllAxes()
+{
+    homeAxis(1);
+    homeAxis(2);
+    homeAxis(3);
+    homeAxis(4);
+    homeAxis(6);
+    waitUntilIdle(6);   // J5's switch is only reachable once J6 has ARRIVED, not merely started moving
+    homeAxis(5);
+    waitUntilIdle(5);
+    finishJ6Home();
+    waitAllIdle();      // J1-J4's return moves overlap all of the wrist work above
+    for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
 }
 
 // Homes ONE joint for the web UI's per-joint "home Jx" command. J5's limit
 // switch can only be reached with J6 parked at its alignment position (the arm
 // hardware, not software, requires this), so a solo J5 home always re-homes
-// J6 first -- the same order the full sequence below already uses. Homing J6
-// alone still needs its own extra move to reach true home (see finishJ6Home).
+// J6 first -- the same order the full sequence uses. Homing J6 alone still
+// needs its own extra move to reach true home (see finishJ6Home).
 inline void homeJointWithDependency(uint8_t joint)
 {
     if (joint == 5) {
         homeAxis(6);
-        while (steppers[5]->isRunning()) {}          // homeAxis()'s final approach is async
+        waitUntilIdle(6);
         homeAxis(5);
-        while (steppers[4]->isRunning()) {}
+        waitUntilIdle(5);
         finishJ6Home();
         steppers[5]->forceStopAndNewPosition(0);
         steppers[4]->forceStopAndNewPosition(0);
@@ -189,7 +221,7 @@ inline void homeJointWithDependency(uint8_t joint)
         return;
     }
     homeAxis(joint);
-    while (steppers[joint - 1]->isRunning()) {}
+    waitUntilIdle(joint);
     if (joint == 6) finishJ6Home();
     steppers[joint - 1]->forceStopAndNewPosition(0);
     restoreNormalMotion(joint);
