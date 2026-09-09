@@ -17,6 +17,7 @@
 #include <vector>
 #include <array>
 #include <cstdlib>
+#include <cctype>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -140,6 +141,11 @@ static std::atomic<bool>        g_stats{false};     // loop/serial counters on/o
 static std::atomic<bool>        g_sim{false};       // drive SimEsp instead of the serial link
 static std::atomic<bool>        g_serial_ok{false}; // a real port is open, so 'sim off' is possible
 static std::atomic<bool>        g_radio{true};      // ESP32 WiFi/ESP-NOW radio enable
+static std::atomic<bool>        g_busy{false};      // a move is still in progress
+// Bumped by every command that starts new motion. `busy` alone cannot tell the
+// sequencer "not picked up yet" from "already finished", which is exactly the
+// ambiguity a very short move creates; waiting for this to change first does.
+static std::atomic<uint32_t>     g_move_seq{0};
 static int                      g_sim_request = -1; // -1 none, 0 off, 1 on; guarded by g_mtx
 
 // Per-joint motion limits (deg/s, deg/s^2, deg/s^3). Editable live via the
@@ -149,7 +155,10 @@ static double g_max_vel[DOFs]  = {240, 80,  120,  314,  314,  314};
 static double g_max_acc[DOFs]  = {600, 600,  600,  1200,  1200, 1200};
 static double g_max_jerk[DOFs] = {1500, 800, 1000, 3000, 3000, 3000};
 static bool   g_have_new_limits = false;  // guarded by g_mtx
-static bool   g_stop_request    = false;  // guarded by g_mtx
+// Global feed override, 0.05..1.0. Scales commanded velocity only -- never
+// accel or jerk -- so a new program can be dry-run slowly without reshaping it.
+static double g_speed_scale      = 1.0;   // guarded by g_mtx
+static bool   g_stop_request     = false; // guarded by g_mtx
 static uint8_t g_motor_enable_mask = 0x3f; // bits 0..5: J1..J6, guarded by g_mtx
 static bool   g_rehome_request = false;    // guarded by g_mtx
 static bool   g_rehome_hold = false;       // owned by the control loop
@@ -280,6 +289,8 @@ static const char* HELP_TEXT =
     "  radio <on|off>      ESP32 WiFi radio; off while moving to A/B stepper noise\n"
     "  move x y z rx ry rz  IK to a Cartesian pose (m, rad), non-linear path\n"
     "  movel x y z rx ry rz  straight-line Cartesian move to a pose (m, rad)\n"
+    "  movel q a1 .. a6    straight-line move to a taught joint waypoint (deg)\n"
+    "  speed <5..100>      global feed override, percent of max velocity\n"
     "  cartframe base|tool  frame for cartjog/cartjogvel deltas & axes\n"
     "  cartjog <axis> <d>   straight-line step along axis (x y z rx ry rz), m|rad\n"
     "  cartjogvel <axis> <v>  velocity-jog along axis (0 to stop); 200ms dead-man\n"
@@ -315,6 +326,18 @@ static std::string handleCommand(const std::string& line) {
     if (tok.empty()) return "";
 
     if (tok[0] == "ping") return "";                                   // just registers the client
+
+    // Anything that can start motion bumps the acceptance counter (see g_move_seq).
+    // Bare "a1 .. a6" and "<j> <angle>" carry no verb, so they are matched by shape.
+    {
+        static const char* kMotionVerbs[] = {"move", "movel", "cartjog", "jog",
+                                             "home", "ready", "rehome", "stop"};
+        bool is_motion = (int)tok.size() == DOFs
+                      || (tok.size() == 2 && std::isdigit((unsigned char)tok[0][0]));
+        for (const char* v : kMotionVerbs) is_motion = is_motion || tok[0] == v;
+        if (is_motion) g_move_seq.fetch_add(1, std::memory_order_relaxed);
+    }
+
     if (tok[0] == "q" || tok[0] == "quit" || tok[0] == "exit") { g_running = false; return "bye"; }
     if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
@@ -357,21 +380,37 @@ static std::string handleCommand(const std::string& line) {
             return "moving";
         } catch (const std::exception&) { return "bad number"; }
     }
+    // Waypoints are taught in joint space, so `movel q ...` takes joint angles and
+    // derives the goal pose by FK here. Doing that conversion in the browser would
+    // use the viewer's display model instead of Pinocchio, and the two can drift.
     if (tok[0] == "movel") {
-        if (tok.size() != 7) return "usage: movel x y z rx ry rz (m, rad)";
+        const bool by_joints = (tok.size() == 8 && (tok[1] == "q" || tok[1] == "joints"));
+        if (!by_joints && tok.size() != 7)
+            return "usage: movel x y z rx ry rz (m, rad)  |  movel q a1 .. a6 (deg)";
         try {
-            double p[6];
-            for (int i = 0; i < 6; i++) p[i] = std::stod(tok[i + 1]);
+            const int off = by_joints ? 2 : 1;
+            double v[6];
+            for (int i = 0; i < 6; i++) v[i] = std::stod(tok[i + off]);
             std::lock_guard<std::mutex> lk(g_mtx);
-            for (int i = 0; i < 6; i++) g_lin_arg[i] = p[i];
-            g_lin_kind = 1;               // absolute pose
+            for (int i = 0; i < 6; i++) g_lin_arg[i] = v[i];
+            g_lin_kind = by_joints ? 3 : 1;
             g_lin_request = true;
             clearJogLocked();
-            return "moving (linear)";
+            return by_joints ? "moving (linear to waypoint)" : "moving (linear)";
         } catch (const std::exception&) { return "bad number"; }
     }
-    if (tok[0] == "cartframe") {
-        if (tok.size() != 2 || (tok[1] != "base" && tok[1] != "tool"))
+    if (tok[0] == "speed") {
+        if (tok.size() != 2) return "usage: speed <5..100>";
+        try {
+            double pct = std::stod(tok[1]);
+            if (pct < 5.0 || pct > 100.0) return "value must be 5..100";
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_speed_scale = pct / 100.0;
+            g_have_new_limits = true;      // pushes the scaled caps into Ruckig next tick
+            return "speed " + tok[1] + "%";
+        } catch (const std::exception&) { return "bad number"; }
+    }
+    if (tok[0] == "cartframe") {        if (tok.size() != 2 || (tok[1] != "base" && tok[1] != "tool"))
             return "usage: cartframe base|tool";
         std::lock_guard<std::mutex> lk(g_mtx);
         g_cart_frame = (tok[1] == "tool") ? 1 : 0;
@@ -862,7 +901,7 @@ int main(int argc, char** argv) {
             }
             if (g_have_new_limits) {
                 for (int i = 0; i < DOFs; i++) {
-                    input.max_velocity[i]     = g_max_vel[i];
+                    input.max_velocity[i]     = g_max_vel[i] * g_speed_scale;
                     input.max_acceleration[i] = g_max_acc[i];
                     input.max_jerk[i]         = g_max_jerk[i];
                 }
@@ -994,6 +1033,10 @@ int main(int argc, char** argv) {
                     Eigen::Matrix<double, 6, 1> p;
                     for (int i = 0; i < 6; i++) p[i] = g_lin_arg[i];
                     goal = Kinematics::poseToSE3(p);
+                } else if (g_lin_kind == 3) {          // taught joint waypoint
+                    Eigen::VectorXd q_wp(DOFs);
+                    for (int i = 0; i < DOFs; i++) q_wp[i] = g_lin_arg[i] * D2R;
+                    goal = kin.fkPose(q_wp);
                 } else {                               // relative delta in the selected frame
                     Eigen::Vector3d dt(g_lin_arg[0], g_lin_arg[1], g_lin_arg[2]);
                     Eigen::Vector3d dr(g_lin_arg[3], g_lin_arg[4], g_lin_arg[5]);
@@ -1072,6 +1115,7 @@ int main(int argc, char** argv) {
                     double sig0 = kin.sigmaMin(q_rad, rf);
                     double vscale = (sig0 < g_cart_speed_scale_eps)
                         ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
+                    vscale *= g_speed_scale;   // feed override, same knob as joint moves
 
                     // Map per-joint velocity/accel/jerk limits onto the scalar path s, so
                     // a nonlinearly-mapped, jerk-limited s(t) still respects the SAME
@@ -1176,6 +1220,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        ruckig::Result ruck_res = ruckig::Result::Finished;
         if (lin_direct) {
             for (int i = 0; i < DOFs; i++) {
                 output.new_position[i]     = q_ref[i]  * R2D;
@@ -1184,7 +1229,18 @@ int main(int argc, char** argv) {
             }
             lin_direct = false;
         } else {
-            ruck.update(input, output);
+            ruck_res = ruck.update(input, output);
+        }
+
+        // "Still moving" for the sequencer: a Cartesian path in progress, a joint
+        // profile Ruckig hasn't finished, or a velocity jog that hasn't decayed.
+        {
+            bool moving = (mode != Mode::Joint) || (ruck_res == ruckig::Result::Working) || g_rehome_hold;
+            if (!moving && input.control_interface == ControlInterface::Velocity) {
+                for (int i = 0; i < DOFs; i++)
+                    if (std::abs(output.new_velocity[i]) > 1e-3) { moving = true; break; }
+            }
+            g_busy = moving;
         }
 
         // Pass output state to the next cycle's input
@@ -1265,22 +1321,29 @@ int main(int argc, char** argv) {
             { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
             if (have) {
                                 double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame; uint8_t grip_cmd;
+                double speed_pct; bool pending;
                 { std::lock_guard<std::mutex> lk(g_mtx);
                                     for (int i = 0; i < DOFs; i++) { tg[i]=g_target[i]; vm[i]=g_max_vel[i]; am[i]=g_max_acc[i]; jm[i]=g_max_jerk[i]; }
-                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; grip_cmd = g_gripper_pos; }
+                                    enabled_mask = g_motor_enable_mask; cart_frame = g_cart_frame; grip_cmd = g_gripper_pos;
+                                    speed_pct = g_speed_scale * 100.0;
+                                    // A command accepted after this tick's request block would
+                                    // otherwise read as "not busy" for one whole publish period.
+                                    pending = g_have_new || g_move_request || g_lin_request
+                                           || g_rehome_request || g_stop_request; }
                 // Live TCP pose: FK of the actual joint feedback (deg -> rad).
                 Eigen::VectorXd q_fb(DOFs);
                 for (int i = 0; i < DOFs; i++) q_fb[i] = rx_packet.actual_position[i] * D2R;
                 Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
                 // Refresh the gauge from feedback while idle; the servo path keeps it live.
                 if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
-                char sb[928];
+                char sb[1024];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tcp\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
                     "\"frame\":\"%s\","
-                    "\"sim\":%s,\"can_sim_off\":%s,"
+                    "\"sim\":%s,\"can_sim_off\":%s,\"busy\":%s,"
+                    "\"seq\":%u,\"speed\":%.0f,"
                     "\"grip\":%u,\"grip_ack\":%u,\"urdf\":\"%s\","
                     "\"sigma\":%.5f,"
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
@@ -1294,6 +1357,8 @@ int main(int argc, char** argv) {
                     cart_frame == 1 ? "tool" : "base",
                     simulating ? "true" : "false",
                     g_serial_ok.load() ? "true" : "false",
+                    g_busy.load() || pending ? "true" : "false",
+                    g_move_seq.load(std::memory_order_relaxed), speed_pct,
                     (unsigned)grip_cmd, (unsigned)rx_packet.gripper_pos, URDF_BASENAME,
                     last_sigma_min,
                     vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],

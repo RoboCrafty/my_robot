@@ -144,29 +144,57 @@
         <div class="motorbar" id="motorBar"></div>
       </section>
 
-      <!-- ----------------------------------------------------- poses -->
-      <section class="pane" data-pane="poses">
+      <!-- ------------------------------------------------------ points -->
+      <section class="pane" data-pane="points">
         <div class="toolbar">
-          <input type="text" id="poseName" placeholder="pose name" class="grow" />
-          <button class="btn sm accent" data-act="savePose">Save current</button>
+          <input type="text" id="wpName" placeholder="waypoint name" class="grow" />
+          <button class="btn sm accent" data-act="teachWp">Teach here</button>
         </div>
-        <div class="list" id="poseList"></div>
+        <p class="mut hint">A waypoint stores the <b>joint angles</b>, because a TCP pose
+          alone does not say which arm configuration reaches it. The pose shown is the
+          controller's own FK, kept for reference only.</p>
+        <div class="list" id="wpList"></div>
+      </section>
 
-        <div class="jog-sub">Sequence</div>
+      <!-- ----------------------------------------------------- program -->
+      <section class="pane" data-pane="program">
         <div class="toolbar">
-          <select id="seqPose" class="grow"></select>
-          <input type="number" id="seqDwell" class="num" value="1.5" step="0.1" min="0" title="dwell (s)" />
-          <button class="btn sm" data-act="addStep">＋</button>
+          <select id="progSel" class="grow" title="saved programs"></select>
+          <button class="btn sm" data-act="progNew" title="start an empty program">New</button>
+          <button class="btn sm" data-act="progSave">Save</button>
+          <button class="btn sm bad" data-act="progDelete" title="delete the saved program">✕</button>
         </div>
-        <div class="list" id="stepList"></div>
         <div class="toolbar">
-          <input type="text" id="seqName" placeholder="sequence name" class="grow" />
-          <button class="btn sm" data-act="saveSeq">Save</button>
-          <button class="btn sm accent" data-act="play">▶</button>
-          <button class="btn sm bad" data-act="stopPlay">■</button>
+          <button class="btn sm accent" data-act="progRun" title="run from the top">▶ Run</button>
+          <button class="btn sm" data-act="progPause" title="pause / resume">⏸</button>
+          <button class="btn sm" data-act="progStep" title="execute one step">⏭</button>
+          <button class="btn sm bad" data-act="progStop">■</button>
+          <span style="flex:1"></span>
+          <span class="badge" id="progStatus">idle</span>
         </div>
-        <div class="jog-sub">Saved sequences</div>
-        <div class="list" id="seqList"></div>
+        <div class="toolbar">
+          <span class="mut">speed</span>
+          <input type="range" id="speedOv" class="grow" min="5" max="100" step="5" value="100"
+                 title="global feed override — dry-run a new program slowly" />
+          <span class="val" id="speedOvVal">100%</span>
+        </div>
+
+        <div class="jog-sub">Insert</div>
+        <div class="seg wrap" id="palette"></div>
+
+        <div class="tree" id="progTree"></div>
+        <div class="toolbar">
+          <button class="btn sm" data-act="nodeUp" title="move up">↑</button>
+          <button class="btn sm" data-act="nodeDown" title="move down">↓</button>
+          <button class="btn sm" data-act="nodeIn" title="move into the loop above">⇥</button>
+          <button class="btn sm" data-act="nodeOut" title="move out of the loop">⇤</button>
+          <button class="btn sm" data-act="nodeDup" title="duplicate">⧉</button>
+          <span style="flex:1"></span>
+          <button class="btn sm bad" data-act="nodeDel">✕</button>
+        </div>
+
+        <div class="jog-sub">Step details</div>
+        <div class="inspector" id="inspector"></div>
       </section>
 
       <!-- ----------------------------------------------------- setup -->
