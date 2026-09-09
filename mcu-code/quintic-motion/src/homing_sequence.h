@@ -214,8 +214,8 @@ inline void homeJointWithDependency(uint8_t joint)
         homeAxis(5);
         waitUntilIdle(5);
         finishJ6Home();
-        steppers[5]->forceStopAndNewPosition(0);
-        steppers[4]->forceStopAndNewPosition(0);
+        steppers[5]->setCurrentPosition(0);
+        steppers[4]->setCurrentPosition(0);
         restoreNormalMotion(6);
         restoreNormalMotion(5);
         return;
@@ -223,6 +223,6 @@ inline void homeJointWithDependency(uint8_t joint)
     homeAxis(joint);
     waitUntilIdle(joint);
     if (joint == 6) finishJ6Home();
-    steppers[joint - 1]->forceStopAndNewPosition(0);
+    steppers[joint - 1]->setCurrentPosition(0);
     restoreNormalMotion(joint);
 }

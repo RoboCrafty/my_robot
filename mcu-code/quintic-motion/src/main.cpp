@@ -167,15 +167,18 @@ void onPacket(const uint8_t* buffer, size_t size) {
         if (joint == 0) {
             homeAllAxes();
             for (int i = 0; i < 6; i++) {
-                steppers[i]->forceStopAndNewPosition(0);
+                steppers[i]->setCurrentPosition(0);
                 queued_steps[i] = 0;
                 tick_error[i] = 0;
+                restoreNormalMotion(i + 1);
             }
         } else if (joint <= 6) {
             homeJointWithDependency(joint);              // also re-homes J6 first if joint == 5
+            steppers[joint - 1]->setCurrentPosition(0);
             queued_steps[joint - 1] = 0;
             tick_error[joint - 1] = 0;
-            if (joint == 5) { queued_steps[5] = 0; tick_error[5] = 0; }
+            restoreNormalMotion(joint);
+            if (joint == 5) { steppers[5]->setCurrentPosition(0); queued_steps[5] = 0; tick_error[5] = 0; restoreNormalMotion(6);}
         }
         while (Serial.available()) Serial.read();   // discard anything queued during the blocking homing above
         tx_packet.homing_sequence++;
