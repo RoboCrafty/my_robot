@@ -863,7 +863,7 @@ int main(int argc, char** argv) {
     Mode mode = Mode::Joint;
     uint8_t rehome_mask = 0x3F; // which axes the in-flight rehome affects; set when it starts
     Ruckig<1> ruck_s(0.002);            // jerk-limited scalar path parameter s in [0,1]
-    InputParameter<1> in_s; in_s.synchronization = Synchronization::Time;
+    InputParameter<1> in_s; in_s.synchronization = Synchronization::Phase;
     OutputParameter<1> out_s;
     pinocchio::SE3 lin_start = pinocchio::SE3::Identity();
     pinocchio::SE3 lin_goal  = pinocchio::SE3::Identity();
@@ -1176,6 +1176,7 @@ int main(int argc, char** argv) {
 
                     pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
                     q_prev = q_ref;
+                    // 1. Feasibility check: is this point on the path actually reachable?
                     auto ik = kin.InverseKinematics_Positional(desired, q_ref);
                     if (ik.status != 1) {
                         mode = Mode::Joint;
@@ -1186,18 +1187,49 @@ int main(int argc, char** argv) {
                         }
                         std::fprintf(stderr, "[cart] linear move aborted: no IK solution on path at s=%.3f\n", s);
                     } else {
-                        q_ref = ik.q;
-                        // Must be the exact derivative of what we stream as position: the ESP
-                        // pins step count from pos_cmd and step rate from vel_cmd, so any
-                        // disagreement between the two shows up as roughness.
-                        dq_ref = (q_ref - q_prev) / LOOP_DT;
-                        last_sigma_min = sig0;
+                        // 2. Where is the planner right now?
+                        pinocchio::SE3 current = kin.fkPose(q_ref);
+                        
+                        // 3. Calculate spatial error (Proportional term)
+                        Eigen::Matrix<double,6,1> err_twist = Kinematics::poseError(current, desired);
+                        double Kp = 20.0; // Tuning gain for position correction
+                        
+                        // 4. Calculate Feedforward velocity from the path trajectory
+                        Eigen::Matrix<double,6,1> ff_twist = lin_path_dir * out_s.new_velocity[0]; 
+
+                        // 5. Combine and send to your robust RRMC solver
+                        Eigen::Matrix<double,6,1> target_twist = ff_twist + (Kp * err_twist);
+
+                        // Use q_ref (ideal internal state) to calculate Jacobian, not q_rad
+                        auto rr = kin.resolvedRate(q_ref, target_twist, dq_ref, pinocchio::LOCAL_WORLD_ALIGNED);
+                        
+                        // 6. SINGULARITY SAFETY ABORT
+                        // If the arm cannot physically produce the requested twist (e.g. boundary reached),
+                        // abort the linear move immediately to prevent DLS deflection (Z-axis diving).
+                       if (rr.track_err > g_cart_track_err_max) {
+                            mode = Mode::Joint;
+                            input.control_interface = ControlInterface::Position;
+                            for (int i = 0; i < DOFs; i++) {
+                                input.target_position[i] = input.current_position[i];
+                                g_target[i]              = input.current_position[i];
+                            }
+                            dq_ref.setZero();
+                            std::fprintf(stderr, "[cart] linear move aborted: hit singularity boundary (track_err %.2f%%)\n", rr.track_err * 100.0);
+                        } else {
+                            // 7. Integrate velocity to get smooth position
+                            q_ref = q_prev + (dq_ref * LOOP_DT);
+                        }
+
+                        last_sigma_min = rr.sigma_min;
                         lin_direct = true;
+                        
                         for (int i = 0; i < DOFs; i++) g_target[i] = q_ref[i] * R2D;
-                        if (s >= 1.0 - 1e-9) {
+                        
+                        if (s >= 1.0 - 1e-9 && err_twist.norm() < 1e-6 && target_twist.norm() < 1e-5) {
                             mode = Mode::Joint;          // q_ref already IS the goal; nothing to settle
                             input.control_interface = ControlInterface::Position;
                             for (int i = 0; i < DOFs; i++) input.target_position[i] = q_ref[i] * R2D;
+                            dq_ref.setZero();
                         }
                     }
                 }
