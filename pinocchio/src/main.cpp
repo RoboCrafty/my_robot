@@ -142,6 +142,8 @@ static std::atomic<bool>        g_sim{false};       // drive SimEsp instead of t
 static std::atomic<bool>        g_serial_ok{false}; // a real port is open, so 'sim off' is possible
 static std::atomic<bool>        g_radio{true};      // ESP32 WiFi/ESP-NOW radio enable
 static std::atomic<bool>        g_busy{false};      // a move is still in progress
+static pinocchio::SE3           g_jog_target_pose;
+static bool                     g_jog_initialized = false;
 // Bumped by every command that starts new motion. `busy` alone cannot tell the
 // sequencer "not picked up yet" from "already finished", which is exactly the
 // ambiguity a very short move creates; waiting for this to change first does.
@@ -1109,7 +1111,25 @@ int main(int argc, char** argv) {
                     if (g_cart_jog_vel[i] != 0.0 && cnow_ns > g_cart_jog_deadline_ns[i]) g_cart_jog_vel[i] = 0.0;
                     if (g_cart_jog_vel[i] != 0.0) any_cart = true;
                 }
-                if (any_cart) mode = Mode::CartVel;   // a fresh cart jog wins over a finishing lin move
+                
+                if (any_cart && mode != Mode::CartVel) {
+                    mode = Mode::CartVel;
+                    for (int i = 0; i < DOFs; i++) q_ref[i] = input.current_position[i] * D2R;
+                    
+                    // Seed the perfect mathematical ghost to our exact starting position
+                    g_jog_target_pose = kin.fkPose(q_ref);
+                    g_jog_initialized = true;
+                    
+                    // Reset Ruckig jog filters
+                    for (int i = 0; i < 6; i++) {
+                        in_jog.current_position[i] = 0.0;
+                        in_jog.current_velocity[i] = 0.0;
+                        in_jog.current_acceleration[i] = 0.0;
+                    }
+                } else if (any_cart) {
+                    // We are already jogging, just ensure the mode stays active
+                    mode = Mode::CartVel;
+                }
             }
 
             // --- Cartesian: resolve twist -> joint velocities (runs last, wins) ---
@@ -1235,52 +1255,112 @@ int main(int argc, char** argv) {
                 }
 
                 if (mode == Mode::CartVel) {
-                    input.control_interface = ControlInterface::Velocity;
-                    // Time-sync forces all 6 joints to reach their (constantly updating)
-                    // velocity target together, preserving the ratio resolvedRate solved
-                    // for. Synchronization::None let each joint ramp independently under
-                    // its own accel/jerk limit -- since the Cartesian target keeps moving
-                    // every 2ms tick, joints never truly settle, and independent ramps
-                    // transiently distort the velocity ratio -> leaks into other axes.
-                    // This is the real mechanism behind the drift; no feedback/PID needed.
-                    input.synchronization   = Synchronization::Time;
-                    Eigen::VectorXd dq_rad(DOFs);
-                    auto rr = kin.resolvedRate(q_rad, twist, dq_rad, rf);
-                    last_sigma_min = rr.sigma_min;
-
-                    if (rr.track_err > g_cart_track_err_max) {
-                        // The arm physically cannot produce this twist (singularity or
-                        // reach limit). Hold at zero velocity for this tick only -- stay
-                        // in Velocity control and Cartesian mode so motion resumes the
-                        // instant the twist becomes feasible again (e.g. user reverses).
-                        // Exiting the mode here would make the web UI's ~60ms jog refresh
-                        // re-enter and re-trip this block every cycle, producing a
-                        // start/stop chatter that looks like the arm "going crazy".
-                        for (int i = 0; i < DOFs; i++) {
-                            input.target_velocity[i]     = 0.0;
-                            input.target_acceleration[i] = 0.0;
-                        }
-                        if (!sing_warned) {
-                            sing_warned = true;
-                            std::fprintf(stderr,
-                                "[cart] blocked: %.0f%% of requested twist unachievable "
-                                "(sigma_min %.4f) -- holding\n", rr.track_err * 100.0, rr.sigma_min);
-                        }
-                    } else {
-                        sing_warned = false;
-                        Eigen::VectorXd dq_deg = dq_rad * R2D;
-                        // Velocity control ignores max_velocity, so clamp here, preserving direction.
-                        double vscale = 1.0;
-                        for (int i = 0; i < DOFs; i++) {
-                            double a = std::abs(dq_deg[i]);
-                            if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
-                        }
-                        for (int i = 0; i < DOFs; i++) {
-                            input.target_velocity[i]     = dq_deg[i] * vscale;
-                            input.target_acceleration[i] = 0.0;
-                        }
+                    for (int i = 0; i < 6; i++) twist[i] = g_cart_jog_vel[i];
+                    rf = (g_cart_frame == 1) ? pinocchio::LOCAL : pinocchio::LOCAL_WORLD_ALIGNED;
+                    
+                    // 1. Adaptive Braking near singularities (Use q_ref, not q_rad)
+                    double sig0 = kin.sigmaMin(q_ref, rf); 
+                    if (sig0 < g_cart_speed_scale_eps) {
+                        twist *= std::max(0.15, sig0 / g_cart_speed_scale_eps);
                     }
-                    for (int i = 0; i < DOFs; i++) g_target[i] = input.current_position[i]; // UI target tracks live pose
+
+                    // 2. Smooth the Cartesian twist using Ruckig_jog
+                    for (int i = 0; i < 6; i++) {
+                        in_jog.max_velocity[i]     = (i < 3) ? g_cart_amax : g_cart_awmax;
+                        in_jog.max_acceleration[i] = (i < 3) ? g_cart_jmax : g_cart_jwmax;
+                        in_jog.target_position[i]  = twist[i];
+                    }
+                    ruck_jog.update(in_jog, out_jog);
+                    for (int i = 0; i < 6; i++) twist[i] = out_jog.new_position[i];
+                    out_jog.pass_to_input(in_jog);
+
+                    // 3. Track the mathematical ghost
+                    if (g_jog_initialized) {
+                        Eigen::Matrix3d dR = pinocchio::exp3(twist.tail<3>() * LOOP_DT);
+                        Eigen::Vector3d dp = twist.head<3>() * LOOP_DT;
+                        
+                        if (rf == pinocchio::LOCAL) {
+                            g_jog_target_pose = g_jog_target_pose * pinocchio::SE3(dR, dp);
+                        } else {
+                            g_jog_target_pose = pinocchio::SE3(dR * g_jog_target_pose.rotation(), 
+                                                               g_jog_target_pose.translation() + dp);
+                        }
+
+                        pinocchio::SE3 current_pose = kin.fkPose(q_ref);
+                        Eigen::Matrix<double,6,1> err_twist = Kinematics::poseError(current_pose, g_jog_target_pose);
+                        // NEW FIX: Tether the mathematical ghost to the physical arm.
+                        // If the joints hit their speed limits, the ghost will try to outrun the arm.
+                        // This prevents the massive tracking error that causes the "jump" on release.
+                        double max_err_norm = 0.001; // Max allowed lag (50mm or ~3 degrees)
+                        if (err_twist.norm() > max_err_norm) {
+                            // Scale the error down to the maximum allowed limit
+                            Eigen::Matrix<double,6,1> capped_err = err_twist * (max_err_norm / err_twist.norm());
+                            
+                            // Pull the ghost backward so it sits exactly at the boundary of the tether
+                            if (rf == pinocchio::LOCAL) {
+                                g_jog_target_pose = current_pose * pinocchio::SE3(pinocchio::exp3(capped_err.tail<3>()), capped_err.head<3>());
+                            } else {
+                                g_jog_target_pose = pinocchio::SE3(pinocchio::exp3(capped_err.tail<3>()) * current_pose.rotation(), 
+                                                                   current_pose.translation() + capped_err.head<3>());
+                            }
+                            // Update the error twist to match the newly capped ghost
+                            err_twist = capped_err;
+                        }
+                        // FIX: Rotate the world-aligned error twist into the local frame if jogging in Tool space
+                        if (rf == pinocchio::LOCAL) {
+                            err_twist.head<3>() = current_pose.rotation().transpose() * err_twist.head<3>();
+                            err_twist.tail<3>() = current_pose.rotation().transpose() * err_twist.tail<3>();
+                        }
+                        
+                        double Kp = 200.0;
+                        Eigen::Matrix<double,6,1> target_twist = twist + (Kp * err_twist);
+
+                        // 4. Resolve Joint Velocities
+                        auto rr = kin.resolvedRate(q_ref, target_twist, dq_ref, rf);
+                        
+                        // 5. Singularity Safety Abort
+                        if (rr.track_err > g_cart_track_err_max) {
+                            dq_ref.setZero(); // Stop if blocked
+                            if (!sing_warned) {
+                                sing_warned = true;
+                                std::fprintf(stderr, "[cart] jog blocked: %.0f%% unachievable (sigma_min %.4f) -- holding\n", 
+                                             rr.track_err * 100.0, rr.sigma_min);
+                            }
+                            // Keep the ghost from running away while we are physically blocked
+                            g_jog_target_pose = current_pose; 
+                        } else {
+                            sing_warned = false;
+                            double vscale = 1.0;
+                            for (int i = 0; i < DOFs; i++) {
+                                double a = std::abs(dq_ref[i] * R2D);
+                                if (a > g_max_vel[i]) vscale = std::min(vscale, g_max_vel[i] / a);
+                            }
+                            dq_ref *= vscale;
+                        }
+
+                        // 6. Integrate velocity into smooth position
+                        q_prev = q_ref;
+                        q_ref = q_ref + (dq_ref * LOOP_DT);
+                        last_sigma_min = rr.sigma_min;
+                        
+                        // CRITICAL: Bypass the joint Ruckig planner to avoid zero-crossing jolts
+                        lin_direct = true; 
+                        for (int i = 0; i < DOFs; i++) g_target[i] = q_ref[i] * R2D;
+                    }
+
+                    // 7. Exit condition: buttons released AND twist has fully decelerated
+                    bool button_released = true;
+                    for (int i = 0; i < 6; i++) {
+                        if (g_cart_jog_vel[i] != 0.0) button_released = false;
+                    }
+                    
+                    if (button_released && twist.norm() < 1e-6) {
+                        mode = Mode::Joint;
+                        input.control_interface = ControlInterface::Position;
+                        for (int i = 0; i < DOFs; i++) input.target_position[i] = q_ref[i] * R2D;
+                        dq_ref.setZero();
+                        g_jog_initialized = false;
+                    }
                 }
             }
         }
