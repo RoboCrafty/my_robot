@@ -1165,10 +1165,7 @@ int main(int argc, char** argv) {
                     // Same braking, applied to the path's own speed limit (not the twist
                     // after the fact) so `s` never marches ahead of what's achievable --
                     // that mismatch would just show up later as feedback-driven lag.
-                    double sig0 = kin.sigmaMin(q_rad, rf);
-                    double vscale = (sig0 < g_cart_speed_scale_eps)
-                        ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
-                    vscale *= g_speed_scale;   // feed override, same knob as joint moves
+                    
 
                     // Map per-joint velocity/accel/jerk limits onto the scalar path s, so
                     // a nonlinearly-mapped, jerk-limited s(t) still respects the SAME
@@ -1176,27 +1173,25 @@ int main(int argc, char** argv) {
                     // the path's own Cartesian-space bounds. Recomputed every tick since
                     // the Jacobian -- and thus how much each joint moves per unit of s --
                     // changes along the path.
-                    Eigen::VectorXd dqds(DOFs);
-                    kin.resolvedRate(q_ref, lin_path_dir, dqds, rf);
-                    double sdot_cap = 1e9, sddot_cap = 1e9, sdddot_cap = 1e9;
-                    for (int i = 0; i < DOFs; i++) {
-                        double a = std::abs(dqds[i]);
-                        if (a < 1e-9) continue;
-                        sdot_cap   = std::min(sdot_cap,   (g_max_vel[i]  * D2R) / a);
-                        sddot_cap  = std::min(sddot_cap,  (g_max_acc[i]  * D2R) / a);
-                        sdddot_cap = std::min(sdddot_cap, (g_max_jerk[i] * D2R) / a);
-                    }
-                    in_s.max_velocity     = {std::min(lin_vmax_nominal * vscale, sdot_cap)};
-                    in_s.max_acceleration = {std::min(lin_amax_nominal * vscale, sddot_cap)};
-                    in_s.max_jerk         = {std::min(lin_jmax_nominal * vscale, sdddot_cap)};
+
+                    // 1. Scale velocity for singularities, but NEVER touch accel/jerk mid-move.
+                    // This guarantees Ruckig always has the braking power it needs to stop exactly at s=1.0.
+                    double sig0 = kin.sigmaMin(q_rad, rf);
+                    double vscale = (sig0 < g_cart_speed_scale_eps)
+                        ? std::max(0.15, sig0 / g_cart_speed_scale_eps) : 1.0;
+                    vscale *= g_speed_scale;   
+
+                    in_s.max_velocity     = {lin_vmax_nominal * vscale};
+                    in_s.max_acceleration = {lin_amax_nominal}; // Fixed!
+                    in_s.max_jerk         = {lin_jmax_nominal}; // Fixed!
 
                     ruck_s.update(in_s, out_s);
-                    double s    = out_s.new_position[0];
-                    out_s.pass_to_input(in_s);
-
+                    double s = out_s.new_position[0];
+                    
                     pinocchio::SE3 desired = Kinematics::interpolatePose(lin_start, lin_goal, s);
                     q_prev = q_ref;
-                    // 1. Feasibility check: is this point on the path actually reachable?
+                    
+                    // 2. Feasibility check
                     auto ik = kin.InverseKinematics_Positional(desired, q_ref);
                     if (ik.status != 1) {
                         mode = Mode::Joint;
@@ -1207,26 +1202,37 @@ int main(int argc, char** argv) {
                         }
                         std::fprintf(stderr, "[cart] linear move aborted: no IK solution on path at s=%.3f\n", s);
                     } else {
-                        // 2. Where is the planner right now?
                         pinocchio::SE3 current = kin.fkPose(q_ref);
-                        
-                        // 3. Calculate spatial error (Proportional term)
                         Eigen::Matrix<double,6,1> err_twist = Kinematics::poseError(current, desired);
-                        double Kp = 20.0; // Tuning gain for position correction
                         
-                        // 4. Calculate Feedforward velocity from the path trajectory
-                        Eigen::Matrix<double,6,1> ff_twist = lin_path_dir * out_s.new_velocity[0]; 
+                        // 3. THE TETHER (Fixes joints falling behind without slashing brakes)
+                        double max_err_norm = 0.002; // 2mm / 0.11 deg max lag
+                        if (err_twist.norm() > max_err_norm) {
+                            Eigen::Matrix<double,6,1> capped_err = err_twist * (max_err_norm / err_twist.norm());
+                            
+                            // Yank the Ruckig mathematical ghost backward so it waits for the arm
+                            if (rf == pinocchio::LOCAL) {
+                                desired = current * pinocchio::SE3(pinocchio::exp3(capped_err.tail<3>()), capped_err.head<3>());
+                            } else {
+                                desired = pinocchio::SE3(pinocchio::exp3(capped_err.tail<3>()) * current.rotation(), 
+                                                         current.translation() + capped_err.head<3>());
+                            }
+                            err_twist = capped_err;
+                            
+                            // Push the capped position back into Ruckig so its math stays in sync with reality
+                            out_s.new_position[0] = s - 0.001; // nudge s slightly back
+                        }
+                        out_s.pass_to_input(in_s); // Save state for next tick
 
-                        // 5. Combine and send to your robust RRMC solver
+                        // 4. Calculate RRMC Twist
+                        double Kp = 20.0; 
+                        Eigen::Matrix<double,6,1> ff_twist = lin_path_dir * out_s.new_velocity[0]; 
                         Eigen::Matrix<double,6,1> target_twist = ff_twist + (Kp * err_twist);
 
-                        // Use q_ref (ideal internal state) to calculate Jacobian, not q_rad
                         auto rr = kin.resolvedRate(q_ref, target_twist, dq_ref, pinocchio::LOCAL_WORLD_ALIGNED);
                         
-                        // 6. SINGULARITY SAFETY ABORT
-                        // If the arm cannot physically produce the requested twist (e.g. boundary reached),
-                        // abort the linear move immediately to prevent DLS deflection (Z-axis diving).
-                       if (rr.track_err > g_cart_track_err_max) {
+                        // 5. Singularity Safety Abort
+                        if (rr.track_err > g_cart_track_err_max) {
                             mode = Mode::Joint;
                             input.control_interface = ControlInterface::Position;
                             for (int i = 0; i < DOFs; i++) {
@@ -1236,7 +1242,15 @@ int main(int argc, char** argv) {
                             dq_ref.setZero();
                             std::fprintf(stderr, "[cart] linear move aborted: hit singularity boundary (track_err %.2f%%)\n", rr.track_err * 100.0);
                         } else {
-                            // 7. Integrate velocity to get smooth position
+                            // 6. Enforce Joint Limits safely without breaking Ruckig
+                            double joint_vscale = 1.0;
+                            for (int i = 0; i < DOFs; i++) {
+                                double a = std::abs(dq_ref[i] * R2D);
+                                if (a > g_max_vel[i]) joint_vscale = std::min(joint_vscale, g_max_vel[i] / a);
+                            }
+                            dq_ref *= joint_vscale;
+                            
+                            // 7. Integrate
                             q_ref = q_prev + (dq_ref * LOOP_DT);
                         }
 
