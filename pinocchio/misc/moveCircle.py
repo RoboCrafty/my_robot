@@ -3,7 +3,7 @@ import time
 import math
 
 # Connection to your C++ controller
-UDP_IP = "192.168.219.168"
+UDP_IP = "127.0.0.1"
 UDP_PORT = 5005
 
 # Create the UDP socket
