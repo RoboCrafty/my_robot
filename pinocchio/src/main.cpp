@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <cstdlib>
 #include <cctype>
 
@@ -194,8 +195,8 @@ static bool   g_lin_request = false;  // guarded by g_mtx
 
 // Cartesian motion limits: translational (m/s, m/s^2, m/s^3) and rotational
 // (rad/s, rad/s^2, rad/s^3). guarded by g_mtx.
-static double g_cart_vmax  = 0.10, g_cart_amax  = 0.40, g_cart_jmax  = 2.0;
-static double g_cart_wmax  = 0.80, g_cart_awmax = 3.0,  g_cart_jwmax = 15.0;
+static double g_cart_vmax  = 0.5, g_cart_amax  = 0.50, g_cart_jmax  = 6.0;
+static double g_cart_wmax  = 1.57, g_cart_awmax = 6.0,  g_cart_jwmax = 15.0;
 
 // Stop Cartesian motion once this FRACTION (0..1, NOT a distance) of the
 // requested twist is unachievable -- directional, so one blocked rotation axis
@@ -272,8 +273,12 @@ static bool popTelemetry(TelemetrySample& out) {
 // as the REPL; state out = a compact JSON line for the Python web UI.
 static int         g_udp_fd = -1;
 static std::mutex  g_addr_mtx;
-static sockaddr_in g_client{};
-static bool        g_have_client = false;
+// Telemetry goes to every address that has sent a command recently -- not just the
+// last one -- so two simultaneous senders (e.g. the browser and a script) don't
+// steal the state broadcast from each other. Entries expire after CLIENT_TIMEOUT_NS.
+struct UdpClient { sockaddr_in addr; int64_t last_seen_ns; };
+static std::vector<UdpClient> g_clients;
+static const int64_t CLIENT_TIMEOUT_NS = 5'000'000'000LL; // 5s
 
 static const char* HELP_TEXT =
     "\nCommands:\n"
@@ -677,13 +682,13 @@ static void udpThread(int udp_port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((uint16_t)udp_port);
     if (bind(g_udp_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "UDP: bind() failed on port " << udp_port << "\n";
         close(g_udp_fd); g_udp_fd = -1; return;
     }
-    std::cout << "UDP command interface on 127.0.0.1:" << udp_port << "\n";
+    std::cout << "UDP command interface on 0.0.0.0:" << udp_port << "\n";
 
     char buf[1024];
     while (g_running.load()) {
@@ -691,7 +696,18 @@ static void udpThread(int udp_port) {
         ssize_t n = recvfrom(g_udp_fd, buf, sizeof(buf) - 1, 0, (sockaddr*)&cli, &clilen);
         if (n <= 0) continue;                                // timeout or error -> re-check g_running
         buf[n] = '\0';
-        { std::lock_guard<std::mutex> lk(g_addr_mtx); g_client = cli; g_have_client = true; }
+        {
+            std::lock_guard<std::mutex> lk(g_addr_mtx);
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+            bool found = false;
+            for (auto& c : g_clients) {
+                if (c.addr.sin_addr.s_addr == cli.sin_addr.s_addr && c.addr.sin_port == cli.sin_port) {
+                    c.last_seen_ns = now_ns; found = true; break;
+                }
+            }
+            if (!found) g_clients.push_back({cli, now_ns});
+        }
         handleCommand(std::string(buf, (size_t)n));
     }
     close(g_udp_fd); g_udp_fd = -1;
@@ -1495,9 +1511,15 @@ int main(int argc, char** argv) {
         // Publish state to the web UI over UDP at ~30 Hz.
         static int pub = 0;
         if (g_udp_fd >= 0 && (++pub % 16 == 0)) {
-            bool have; sockaddr_in cli;
-            { std::lock_guard<std::mutex> lk(g_addr_mtx); have = g_have_client; cli = g_client; }
-            if (have) {
+            std::vector<sockaddr_in> targets;
+            { std::lock_guard<std::mutex> lk(g_addr_mtx);
+              struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+              int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+              g_clients.erase(std::remove_if(g_clients.begin(), g_clients.end(),
+                  [&](const UdpClient& c) { return now_ns - c.last_seen_ns > CLIENT_TIMEOUT_NS; }),
+                  g_clients.end());
+              for (auto& c : g_clients) targets.push_back(c.addr); }
+            if (!targets.empty()) {
                                 double tg[DOFs], vm[DOFs], am[DOFs], jm[DOFs]; uint8_t enabled_mask; int cart_frame; uint8_t grip_cmd;
                 double speed_pct; bool pending;
                 { std::lock_guard<std::mutex> lk(g_mtx);
@@ -1545,7 +1567,8 @@ int main(int argc, char** argv) {
                     (enabled_mask & 0x01) != 0, (enabled_mask & 0x02) != 0,
                     (enabled_mask & 0x04) != 0, (enabled_mask & 0x08) != 0,
                     (enabled_mask & 0x10) != 0, (enabled_mask & 0x20) != 0);
-                if (len > 0) sendto(g_udp_fd, sb, (size_t)len, 0, (sockaddr*)&cli, sizeof(cli));
+                if (len > 0)
+                    for (auto& cli : targets) sendto(g_udp_fd, sb, (size_t)len, 0, (sockaddr*)&cli, sizeof(cli));
             }
         }
 
