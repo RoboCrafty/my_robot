@@ -116,7 +116,7 @@
     <inertial>
       <origin
         xyz="-0.0094181617193695 -0.0783879603613605 0.0369429741417731"
-        rpy="0 0 0" />
+        rpy="0 0 1.5707963267949" />
       <mass
         value="0.512334779399788" />
       <inertia
@@ -144,7 +144,7 @@
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 0 1.5707963267949" />
       <geometry>
         <mesh
           filename="meshes/L2.STL" />
@@ -174,7 +174,7 @@
     <inertial>
       <origin
         xyz="0.0155509885239593 -0.0191127686426613 -0.00153322577917236"
-        rpy="0 0 0" />
+        rpy="3.14 0 0" />
       <mass
         value="0.550970997806044" />
       <inertia
@@ -202,7 +202,7 @@
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="3.14 0 0" />
       <geometry>
         <mesh
           filename="meshes/L3.STL" />
@@ -232,7 +232,7 @@
     <inertial>
       <origin
         xyz="0.000947028430634433 -0.008978947112462 -0.0924798659827059"
-        rpy="0 0 0" />
+        rpy="3.14 0 3.14" />
       <mass
         value="0.39346362633915" />
       <inertia
@@ -259,8 +259,8 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0 0 -0.17635"
+        rpy="3.14 0 3.14" />
       <geometry>
         <mesh
           filename="meshes/L4.STL" />
@@ -290,7 +290,7 @@
     <inertial>
       <origin
         xyz="6.7162171684676E-06 -0.00621420980825221 -0.000960871025916146"
-        rpy="0 0 0" />
+        rpy="0 3.14 0" />
       <mass
         value="0.185171777001718" />
       <inertia
@@ -318,7 +318,7 @@
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 3.14 0" />
       <geometry>
         <mesh
           filename="meshes/L5.STL" />
@@ -389,7 +389,7 @@
       </geometry>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0" />
+      <origin xyz="0.0 0.001 0.154" rpy="-1.57 0 1.57" />
       <geometry>
         <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
       </geometry>
@@ -414,7 +414,7 @@
       </geometry>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 3.14159" />
+      <origin xyz="0.0 -0.001 0.154" rpy="-1.57 0 -1.57" />
       <geometry>
         <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
       </geometry>
