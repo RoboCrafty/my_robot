@@ -1,6 +1,6 @@
 # Parol6 Main
 
-~~ > Very experimental, currently randomly trying out various trajectories and motion profiles for the esp32 for the Parol6 project.~~
+~~Very experimental, currently randomly trying out various trajectories and motion profiles for the esp32 for the Parol6 project.~~
 
 Less Experemental now. 
 This repo contains the entire codebase for my custom software stack for the Parol6 robot by Source Robotics.
