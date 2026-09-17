@@ -1,0 +1,8 @@
+<mujoco>
+    <include file="parol6-PGripper-Base.xml"/>
+    <worldbody>
+    <!-- Static scene cameras -->
+    <camera name="top_down_cam" pos="0 0 1" zaxis="0 0 1" fovy="75"/>
+  </worldbody>
+
+</mujoco>

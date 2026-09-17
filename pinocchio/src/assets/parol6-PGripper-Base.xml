@@ -51,6 +51,7 @@
                 <geom name="L5_collision" quat="0.0008 0 1 0" type="mesh" mesh="L5_collision_L5" class="collision" />
                 <geom name="L5_visual" quat="0.0008 0 1 0" type="mesh" mesh="L5_L5" material="default_material" class="visual" />
                 <body name="tool" quat="0.7071 -0.7071 0 0">
+                  <camera name="wrist_cam" pos="0.08 0 0.08" euler="3.14 0.4 -1.57" fovy="105"/>
                   <joint name="J6" type="hinge" range="-3.1 3.1" axis="0 0 1" />
                   <geom name="tool_collision" pos="0 0 0.038" quat="0.0008 1 0 0" type="mesh" mesh="tool_collision_Gripper2_base_with_servo_1" class="collision" />
                   <geom pos="0 0 0.038" quat="0.0008 1 0 0" type="mesh" class="visual" name="tool_visual_0" mesh="tool_Gripper2_base_with_servo_0_1" material="Gripper2_base_Material" />
