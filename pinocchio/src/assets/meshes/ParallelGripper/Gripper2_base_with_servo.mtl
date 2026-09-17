@@ -1,0 +1,52 @@
+# MTL file - created by a modified js OBJExporter
+
+newmtl Paint_-_Metallic_(Green)
+Tr 0.0000
+Tf 1.0000 1.0000 1.0000
+illum 1
+Pr 1
+Pds 1
+Pl 1
+Pccns 1-1
+Pior 1
+Pshc 0 0 0
+Pshr 1
+Psi 1
+Psc 1 1 1
+Ka 1 1 1
+Kd 0.2666670083999634 0.5882350206375122 0.282353013753891
+Ke 0 0 0
+
+newmtl PA_12_-_Nylon_-_PA_603-CF_(with_EOS_P_3D_Printers)
+Tr 0.0000
+Tf 1.0000 1.0000 1.0000
+illum 1
+Pr 1
+Pds 1
+Pl 1
+Pccns 1-1
+Pior 1
+Pshc 0 0 0
+Pshr 1
+Psi 1
+Psc 1 1 1
+Ka 1 1 1
+Kd 0.24705900251865387 0.24705900251865387 0.24705900251865387
+Ke 0 0 0
+
+newmtl Nylon_12_(with_Formlabs_Fuse_1_3D_Printer)
+Tr 0.0000
+Tf 1.0000 1.0000 1.0000
+illum 1
+Pr 1
+Pds 1
+Pl 1
+Pccns 1-1
+Pior 1
+Pshc 0 0 0
+Pshr 1
+Psi 1
+Psc 1 1 1
+Ka 1 1 1
+Kd 0.24705900251865387 0.24705900251865387 0.24705900251865387
+Ke 0 0 0

@@ -1,0 +1,131 @@
+<mujoco model="parol6">
+<option timestep="0.001" iterations="50" integrator="implicitfast"/>
+  <default>
+    <default class="robot">
+      <!-- Scaled down armature and damping for a lightweight arm -->
+      <joint armature="0.05" damping="1.0" frictionloss="0.05" />
+      <default class="gripper_slide">
+        <joint armature="0.005" damping="0.1" frictionloss="0.1" />
+      </default>
+      <!-- <general gaintype="fixed" biastype="affine" /> -->
+      
+      <default class="visual">
+        <geom contype="0" conaffinity="0" group="2" />
+      </default>
+      <default class="collision">
+        <geom contype="0" conaffinity="1" group="3" density="1000" />
+      </default>
+    </default>
+    <default class="floor">
+      <geom type="plane" size="0 0 0.05" material="groundplane" />
+    </default>
+  </default>
+  <!-- <option gravity="0 0 0"/> -->
+  <compiler angle="radian" meshdir="." balanceinertia="true" />
+  <visual>
+    <global offwidth="3840" offheight="2160" />
+  </visual>
+
+  <worldbody>
+    <body name="base_link" childclass="robot" pos="0.0 0.0 0.1105">
+      <geom name="base_link_collision" pos="0 0 -0.1105" type="mesh" mesh="base_link_collision_base_link" class="collision" />
+      <geom name="base_link_visual" pos="0 0 -0.1105" type="mesh" mesh="base_link_base_link" material="default_material" class="visual" />
+      <body name="L1">
+        <joint name="J1" type="hinge" range="-3.054 2.880" axis="0 0 1" />
+        <geom name="L1_collision" pos="0 0 -0.1105" type="mesh" mesh="L1_collision_L1" class="collision" />
+        <geom name="L1_visual" pos="0 0 -0.1105" type="mesh" mesh="L1_L1" material="default_material" class="visual" />
+        <body name="L2" pos="0.0234207210610375 0 0.0" quat="0.5 -0.5 -0.5 -0.5">
+          <joint name="J2" type="hinge" range="-0.873 1.484" axis="0 0 1" />
+          <geom name="L2_collision" quat="0.7071 0 0 0.7071" type="mesh" mesh="L2_collision_L2" class="collision" />
+          <geom name="L2_visual" quat="0.7071 0 0 0.7071" type="mesh" mesh="L2_L2" material="default_material" class="visual" />
+          <body name="L3" pos="0.18 0 0">
+            <joint name="J3" type="hinge" range="-2.541 1.222" axis="0 0 1" />
+            <geom name="L3_collision" quat="0.0008 1 0 0" type="mesh" mesh="L3_collision_L3" class="collision" />
+            <geom name="L3_visual" quat="0.0008 1 0 0" type="mesh" mesh="L3_L3" material="default_material" class="visual" />
+            <body name="L4" pos="0.0435 0.17635 0" quat="0.7071 -0.7071 0 0">
+              <joint name="J4" type="hinge" range="-3.403 1.920" axis="0 0 1" />
+              <geom name="L4_collision" pos="0 0 -0.17635" quat="0 0.0008 1 0.0008" type="mesh" mesh="L4_collision_L4" class="collision" />
+              <geom name="L4_visual" pos="0 0 -0.17635" quat="0 0.0008 1 0.0008" type="mesh" mesh="L4_L4" material="default_material" class="visual" />
+              <body name="L5" quat="0.7071 0.7071 0 0">
+                <joint name="J5" type="hinge" range="-2.007 2.007" axis="0 0 1" />
+                <geom name="L5_collision" quat="0.0008 0 1 0" type="mesh" mesh="L5_collision_L5" class="collision" />
+                <geom name="L5_visual" quat="0.0008 0 1 0" type="mesh" mesh="L5_L5" material="default_material" class="visual" />
+                <body name="tool" quat="0.7071 -0.7071 0 0">
+                  <joint name="J6" type="hinge" range="-3.1 3.1" axis="0 0 1" />
+                  <geom name="tool_collision" pos="0 0 0.038" quat="0.0008 1 0 0" type="mesh" mesh="tool_collision_Gripper2_base_with_servo_1" class="collision" />
+                  <geom pos="0 0 0.038" quat="0.0008 1 0 0" type="mesh" class="visual" name="tool_visual_0" mesh="tool_Gripper2_base_with_servo_0_1" material="Gripper2_base_Material" />
+                  <body name="tcp_link" pos="0 0 0.154" quat="0.7071 0 0 -0.7071" />
+                  <body name="left_jaw" childclass="gripper_slide">
+                    <joint name="left_jaw_joint" type="slide" range="0.0 0.04" axis="0 1 0"/>
+                    <geom name="left_jaw_collision" pos="0.0 0.001 0.154" quat="0.5004 -0.5 -0.4996 0.5" type="mesh" mesh="left_jaw_collision_Gripper2_Jaw_1" class="collision" />
+                    <geom name="left_jaw_visual" pos="0.0 0.001 0.154" quat="0.5004 -0.5 -0.4996 0.5" type="mesh" mesh="left_jaw_Gripper2_Jaw_1" material="Gripper2_Jaw_Material" class="visual" />
+                  </body>
+                  <body name="right_jaw" childclass="gripper_slide">
+                    <joint name="right_jaw_joint" type="slide" range="-0.04 0.0" axis="0 1 0"/>
+                    <geom name="right_jaw_collision" pos="0.0 -0.001 0.154" quat="0.5004 -0.5 0.4996 -0.5" type="mesh" mesh="left_jaw_collision_Gripper2_Jaw_1" class="collision" />
+                    <geom name="right_jaw_visual" pos="0.0 -0.001 0.154" quat="0.5004 -0.5 0.4996 -0.5" type="mesh" mesh="left_jaw_Gripper2_Jaw_1" material="Gripper2_Jaw_Material" class="visual" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    
+    <light pos="0 0 2." dir="0 0 -1" directional="true" />
+    <geom name="floor" class="floor" size="0 0 0.05" />
+  </worldbody>
+
+  <asset>
+    <material name="default_material" rgba="0.7 0.7 0.7 1" />
+    <material name="Gripper2_Jaw_Material" rgba="1 1 0 1.0" />
+    <material name="Gripper2_base_Material" rgba="0 0.58 0.51 1.0" />
+    <mesh name="base_link_collision_base_link" file="meshes/base_link.STL" />
+    <mesh name="base_link_base_link" file="meshes/base_link.STL" />
+    <mesh name="L1_collision_L1" file="meshes/L1.STL" />
+    <mesh name="L1_L1" file="meshes/L1.STL" />
+    <mesh name="L2_collision_L2" file="meshes/L2.STL" />
+    <mesh name="L2_L2" file="meshes/L2.STL" />
+    <mesh name="L3_collision_L3" file="meshes/L3.STL" />
+    <mesh name="L3_L3" file="meshes/L3.STL" />
+    <mesh name="L4_collision_L4" file="meshes/L4.STL" />
+    <mesh name="L4_L4" file="meshes/L4.STL" />
+    <mesh name="L5_collision_L5" file="meshes/L5.STL" />
+    <mesh name="L5_L5" file="meshes/L5.STL" />
+    <mesh name="left_jaw_Gripper2_Jaw" file="meshes/ParallelGripper/Gripper2_Jaw.stl" />
+    <mesh name="left_jaw_Gripper2_Jaw_1" file="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01" />
+    <mesh name="tool_collision_Gripper2_base_with_servo.stl" file="meshes/ParallelGripper/Gripper2_base_with_servo.stl" />
+    <mesh name="tool_collision_Gripper2_base_with_servo_1" file="meshes/ParallelGripper/Gripper2_base_with_servo.stl" scale="0.01 0.01 0.01" />
+    <mesh name="left_jaw_collision_Gripper2_Jaw.stl" file="meshes/ParallelGripper/Gripper2_Jaw.stl" />
+    <mesh name="left_jaw_collision_Gripper2_Jaw_1" file="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01" />
+    <mesh name="tool_Gripper2_base_with_servo_0" file="meshes/ParallelGripper/Gripper2_base_with_servo.stl" />
+    <mesh name="tool_Gripper2_base_with_servo_0_1" file="meshes/ParallelGripper/Gripper2_base_with_servo.stl" scale="0.01 0.01 0.01" />
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2" />
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072" />
+  </asset>
+
+  <actuator>
+    <position name="base_motor"     joint="J1" kp="3000" kv="300" ctrlrange="-3.054 2.880" forcelimited="true" forcerange="-2000 2000"/>
+    <position name="shoulder_motor" joint="J2" kp="3000" kv="300" ctrlrange="-0.873 1.484" forcelimited="true" forcerange="-2000 2000"/>
+    <position name="elbow_motor"    joint="J3" kp="3000" kv="300" ctrlrange="-2.541 1.222" forcelimited="true" forcerange="-2000 2000"/>
+    <position name="wrist1_motor"   joint="J4" kp="100" kv="10" ctrlrange="-3.403 1.920" forcelimited="true" forcerange="-50 50"/>
+    <position name="wrist2_motor"   joint="J5" kp="100" kv="10" ctrlrange="-2.007 2.007" forcelimited="true" forcerange="-50 50"/>
+    <position name="wrist3_motor"   joint="J6" kp="100" kv="10" ctrlrange="-3.1 3.1" forcelimited="true" forcerange="-50 50"/>
+    <position name="left_jaw_joint" joint="left_jaw_joint" kp="500" kv="10" ctrlrange="0.0 0.027" forcelimited="true" forcerange="-50 50" />
+  </actuator>
+
+  <equality>
+    <joint joint1="left_jaw_joint" joint2="right_jaw_joint" polycoef="0.0 -1.0 0 0 0" solimp="0.95 0.99 0.001" solref="0.002 1" />
+  </equality>
+
+  <visual>
+    <rgba haze="0.15 0.25 0.35 1" />
+  </visual>
+  <keyframe>
+    <key name="home"
+          qpos="0 0.245 0.199 1.57 0 0 0 0"/>
+</keyframe>
+
+</mujoco>

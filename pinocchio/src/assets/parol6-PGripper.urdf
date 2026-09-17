@@ -4,7 +4,10 @@
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="parol6">
-
+  <mujoco>
+    <compiler strippath="false" discardvisual="false"/>
+  </mujoco>
+  
   <link name="world"/>
   <joint name="base_joint" type="fixed">
     <parent link="world"/>
@@ -353,13 +356,16 @@
     <visual>  
       <origin xyz="0 0 0.038" rpy="3.14 0 0.0" /> <!-- Tune this to align with J6 -->
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_base_with_servo.dae" scale="0.01 0.01 0.01"/>
+        <mesh filename="meshes/ParallelGripper/Gripper2_base_with_servo.stl" scale="0.01 0.01 0.01"/>
       </geometry>
+      <material name="tool_green">
+        <color rgba="0 0.58 0.51 1.0"/>
+      </material>
     </visual>
     <collision>
       <origin xyz="0 0 0.038" rpy="3.14 0 0" />
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_base_with_servo.dae" scale="0.01 0.01 0.01" />
+        <mesh filename="meshes/ParallelGripper/Gripper2_base_with_servo.stl" scale="0.01 0.01 0.01" />
       </geometry>
     </collision>
   </link>
@@ -385,13 +391,16 @@
     <visual>
       <origin xyz="0.0 0.001 0.154" rpy="-1.57 0 1.57" /> 
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
+        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01"/>
       </geometry>
+      <material name="jaw_yellow">
+        <color rgba="1 1 0 1.0"/>
+      </material>
     </visual>
     <collision>
       <origin xyz="0.0 0.001 0.154" rpy="-1.57 0 1.57" />
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
+        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01"/>
       </geometry>
     </collision>
   </link>
@@ -410,13 +419,16 @@
       <!-- Rotate 180 degrees to face the opposite direction -->
       <origin xyz="0.0 -0.001 0.154" rpy="-1.57 0 -1.57" />
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
+        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01"/>
       </geometry>
+      <material name="jaw_yellow">
+        <color rgba="1 1 0 1.0"/>
+      </material>
     </visual>
     <collision>
       <origin xyz="0.0 -0.001 0.154" rpy="-1.57 0 -1.57" />
       <geometry>
-        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.dae" scale="0.01 0.01 0.01"/>
+        <mesh filename="meshes/ParallelGripper/Gripper2_Jaw.stl" scale="0.01 0.01 0.01"/>
       </geometry>
     </collision>
   </link>
