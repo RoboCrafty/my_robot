@@ -73,7 +73,7 @@ static const float    V_FLOOR            = 1.0f;            // steps/s below whi
 int32_t  queued_steps[6]      = {0, 0, 0, 0, 0, 0};        // steps already appended per axis
 uint32_t movetimed_underruns  = 0;                         // diagnostics: queue-empty events
 int32_t tick_error[6] = {0, 0, 0, 0, 0, 0};                // Tracks accumulated timer quantization error per axis (in ticks)
-
+void printLimitSwitchStates();
 void setup() {
     Serial.begin(921600);
     Serial.setTimeout(2);
@@ -287,6 +287,60 @@ void onPacket(const uint8_t* buffer, size_t size) {
     packetSerial.send(payload, sizeof(payload)); // PacketSerial COBS-frames it
 }
 
+
+void testMoveJoint(int joint, float target_angle_deg, float speed_deg_per_sec) {
+    if (joint < 1 || joint > 6) {
+        Serial.println("Invalid joint number. Must be 1-6.");
+        return;
+    }
+    int i = joint - 1; // 0-indexed for the steppers[] array
+
+    int32_t target_steps = round(target_angle_deg * STEPS_PER_DEG[i]);
+    uint32_t speed_steps_per_sec = round(speed_deg_per_sec * STEPS_PER_DEG[i]);
+
+    Serial.printf("Moving Joint %d to %.2f deg at %.2f deg/s\n", joint, target_angle_deg, speed_deg_per_sec);
+
+    // FastAccelStepper handles the background motion on Core 1
+    steppers[i]->setSpeedInHz(speed_steps_per_sec);
+    // Acceleration remains at 6000 as configured in your setup()
+    // steppers[i]->applySpeedAcceleration();
+    steppers[i]->moveTo(target_steps);
+}
+
+
+// void loop() {
+//     unsigned long current_time = millis();
+
+//     // PUMPS THE UART: Commented out to isolate from the Raspberry Pi planner
+//     // packetSerial.update();
+
+//     // Read commands from the Arduino Serial Monitor
+//     if (Serial.available() > 0) {
+//         String input = Serial.readStringUntil('\n');
+//         input.trim(); 
+
+//         if (input.length() > 0) {
+//             int joint;
+//             float angle, speed;
+
+//             // Parse the input looking for three numbers: "joint angle speed"
+//             int parsed = sscanf(input.c_str(), "%d %f %f", &joint, &angle, &speed);
+
+//             if (parsed == 3) {
+//                 testMoveJoint(joint, angle, speed);
+//             } else {
+//                 Serial.println("Error: Invalid format.");
+//                 Serial.println("Format is: <joint> <angle> <speed>");
+//                 Serial.println("Example: 1 50 30");
+//             }
+//         }
+//     }
+
+//     if (current_time - last_loop_time >= 100) {
+//         last_loop_time += 100;
+//         // printLimitSwitchStates();
+//     }
+// }
 
 void loop() {
     unsigned long current_time = millis();

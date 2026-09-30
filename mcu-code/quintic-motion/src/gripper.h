@@ -21,7 +21,7 @@
 namespace Gripper {
 
 // Slave's burned-in MAC. Read it from the slave with ESP.getEfuseMac().
-static const uint8_t SLAVE_MAC[6] = {0x78, 0x1C, 0x3C, 0xE1, 0x08, 0x1C};
+static const uint8_t SLAVE_MAC[6] = {0x20, 0x50, 0x0D, 0x1A, 0x5A, 0x54};
 
 static const uint32_t RETRY_MS = 25;   // also rate-caps bursts of slider drags
 

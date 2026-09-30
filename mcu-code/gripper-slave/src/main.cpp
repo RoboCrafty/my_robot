@@ -169,98 +169,47 @@
 
 #include <esp_now.h>
 #include <WiFi.h>
+#include <ESP32Servo.h> 
 
-// Slave MAC Address
-uint8_t slaveAddress[] = {0x78, 0x1C, 0x3C, 0xE1, 0x08, 0x1C};
+// Define Servo 
+Servo gripperServo;
+const int servoPin = 18; // Change this to the pin your servo signal wire is connected to
 
 typedef struct struct_message {
     uint8_t gripper_pos; // 0 to 140
 } struct_message;
 
 struct_message gripperData;
-esp_now_peer_info_t peerInfo;
 
-// Keep track of the current angle (starts at 0)
-int currentAngle = 0; 
-
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    Serial.print("Delivery Status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+// Callback function that executes when data is received
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    memcpy(&gripperData, incomingData, sizeof(gripperData));
+    
+    Serial.print("Received Gripper Pos: ");
+    Serial.println(gripperData.gripper_pos);
+    
+    // Command the servo to the received angle
+    gripperServo.write(gripperData.gripper_pos);
 }
 
 void setup() {
     Serial.begin(115200);
-    WiFi.mode(WIFI_STA); 
+    
+    // Attach the servo
+    gripperServo.attach(servoPin);
+    
+    // Initialize ESP-NOW
+    WiFi.mode(WIFI_STA);
     if (esp_now_init() != ESP_OK) {
         Serial.println("Error initializing ESP-NOW");
         return;
     }
     
-    esp_now_register_send_cb(OnDataSent);
-    memcpy(peerInfo.peer_addr, slaveAddress, 6);
-    peerInfo.channel = 0;  
-    peerInfo.encrypt = false;
-    
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-        Serial.println("Failed to add peer");
-        return;
-    }
-
-    Serial.println("Setup Complete.");
-    Serial.println("Press RIGHT ARROW (or 'd') to open (+5 deg).");
-    Serial.println("Press LEFT ARROW (or 'a') to close (-5 deg).");
+    // Register the receive callback
+    esp_now_register_recv_cb(OnDataRecv);
 }
 
 void loop() {
-    if (Serial.available() > 0) {
-        char c = Serial.read();
-        bool positionChanged = false;
-        
-        // 1. Check for ANSI escape sequence (Actual Arrow Keys)
-        if (c == 0x1B) { // ESC character
-            delay(5); // Wait a tiny bit for the rest of the sequence to arrive
-            if (Serial.available() >= 2) {
-                char bracket = Serial.read();
-                char dir = Serial.read();
-                
-                if (bracket == '[') {
-                    if (dir == 'C') { // Right Arrow
-                        currentAngle += 5;
-                        positionChanged = true;
-                    } else if (dir == 'D') { // Left Arrow
-                        currentAngle -= 5;
-                        positionChanged = true;
-                    }
-                }
-            }
-        } 
-        // 2. Fallback for standard keys (Easier for Arduino IDE Serial Monitor)
-        else if (c == 'd' || c == 'D') { // 'D' for Right
-            currentAngle += 5;
-            positionChanged = true;
-        } 
-        else if (c == 'a' || c == 'A') { // 'A' for Left
-            currentAngle -= 5;
-            positionChanged = true;
-        }
-
-        // If a valid key was pressed, process and send
-        if (positionChanged) {
-            // Constrain the angle so it doesn't go below 0 or above 140
-            if (currentAngle > 140) currentAngle = 140;
-            if (currentAngle < 0) currentAngle = 0;
-
-            gripperData.gripper_pos = currentAngle;
-            
-            Serial.print("Moved by 5 degrees. New Position: ");
-            Serial.println(currentAngle);
-            
-            esp_now_send(slaveAddress, (uint8_t *) &gripperData, sizeof(gripperData));
-            
-            // Clear out any remaining characters (like 'Enter' key \n or \r)
-            while(Serial.available() > 0) {
-                Serial.read();
-            }
-        }
-    }
+    // ESP-NOW runs asynchronously in the background. 
+    // You can leave the loop empty or do other tasks here.
 }
