@@ -18,7 +18,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 # --- Robot connection --------------------------------------------------------
-ROBOT_IP = "192.168.87.168"
+ROBOT_IP = "192.168.0.103"
 ROBOT_PORT = 5005
 robot_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
