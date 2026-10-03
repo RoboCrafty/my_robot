@@ -9,7 +9,8 @@ import leap
 from pynput import keyboard
 
 # --- Robot connection --------------------------------------------------------
-ROBOT_IP = "192.168.0.103"
+# ROBOT_IP = "192.168.50.10"
+ROBOT_IP = "rpi.local"
 ROBOT_PORT = 5005
 robot_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -19,12 +20,12 @@ def send_cmd(cmd: str) -> None:
 # --- Perspective & Settings --------------------------------------------------
 # Change this based on where you are sitting relative to the robot's base!
 # 0 = Behind, 180 = In front (facing robot), 90 = Left side, -90 = Right side
-USER_YAW_OFFSET_DEG = 180.0 
+USER_YAW_OFFSET_DEG = -90.0 
 
 # Gripper distance tuning (in millimeters)
 # Measure roughly how far apart your fingers are when you want it "Open" vs "Closed"
-FINGER_DIST_OPEN = 80.0   # mm
-FINGER_DIST_CLOSED = 20.0 # mm
+FINGER_DIST_OPEN = 100.0   # mm
+FINGER_DIST_CLOSED = 25.0 # mm
 
 # --- Keyboard State ----------------------------------------------------------
 key_state = {"move_pressed": False}
@@ -111,8 +112,8 @@ YAW_ROTATION_MATRIX = np.array([
 ])
 
 # --- Teleop main loop --------------------------------------------------------
-POSITION_GAIN = 0.5  
-ROTATION_GAIN = 0.5  
+POSITION_GAIN = 1.0
+ROTATION_GAIN = 0.6  
 RATE_HZ = 50.0
 VEL_CAP = 0.5
 ANG_VEL_CAP = 2.0
@@ -131,7 +132,6 @@ def main():
     last_pos = None
     last_rot = None
     last_time = None
-    home_rotation = Rotation.identity()
     was_enabled = False
     
     smoothed_vel = np.zeros(3)
@@ -153,7 +153,7 @@ def main():
                 # Apply an Exponential Moving Average to protect the servo from jitter
                 smoothed_gripper_val = (GRIPPER_SMOOTHING * smoothed_gripper_val) + ((1.0 - GRIPPER_SMOOTHING) * target_gripper)
                 
-                gripper_cmd = int(np.clip(smoothed_gripper_val, 0.0, 1.0) * GRIPPER_POS_MAX)
+                gripper_cmd = 140 - int(np.clip(smoothed_gripper_val, 0.0, 1.0) * GRIPPER_POS_MAX)
                 if last_gripper_cmd is None or abs(gripper_cmd - last_gripper_cmd) > GRIPPER_EPSILON:
                     send_cmd(f"gripper {gripper_cmd}")
                     last_gripper_cmd = gripper_cmd
@@ -161,7 +161,6 @@ def main():
                 # --- Arm Control ---
                 if enabled:
                     if not was_enabled:
-                        home_rotation = rot.inv()
                         last_pos, last_rot, last_time = pos, rot, loop_start
                         smoothed_vel = np.zeros(3)
                         smoothed_ang_vel = np.zeros(3)
@@ -173,12 +172,10 @@ def main():
                             delta_rotation = rot * last_rot.inv()
                             raw_ang_vel = delta_rotation.as_rotvec() / dt
 
-                            aligned_vel = home_rotation.apply(raw_vel)
-                            aligned_ang_vel = home_rotation.apply(raw_ang_vel)
-                            
-                            # 1. Map from Leap layout to Robot layout
-                            base_robot_vel = _leap_to_robot(aligned_vel) * POSITION_GAIN
-                            base_robot_ang_vel = _leap_to_robot(aligned_ang_vel) * ROTATION_GAIN
+                            # Leap is fixed on the desk, so its frame is already the stable reference;
+                            # re-basing on the hand's pose at clutch would rotate the axes on every re-clutch.
+                            base_robot_vel = _leap_to_robot(raw_vel) * POSITION_GAIN
+                            base_robot_ang_vel = _leap_to_robot(raw_ang_vel) * ROTATION_GAIN
                             
                             # 2. Rotate the frame based on where you are sitting in the room
                             robot_vel = YAW_ROTATION_MATRIX.dot(base_robot_vel)
@@ -190,15 +187,15 @@ def main():
                             smoothed_ang_vel += alpha * (robot_ang_vel - smoothed_ang_vel)
 
                             vx, vy, vz = np.clip(smoothed_vel, -VEL_CAP, VEL_CAP)
-                            wx, wy, wz = np.clip(smoothed_ang_vel, -ANG_VEL_CAP, ANG_VEL_CAP)
+                            wx, wy, wz = np.clip(smoothed_ang_vel, -ANG_VEL_CAP, ANG_VEL_CAP) 
 
                             if (np.linalg.norm([vx, vy, vz]) > MOTION_DEADBAND
                                     or np.linalg.norm([wx, wy, wz]) > MOTION_DEADBAND):
                                 send_cmd(f"cartjogvel x {vx:.4f}")
                                 send_cmd(f"cartjogvel y {vy:.4f}")
                                 send_cmd(f"cartjogvel z {vz:.4f}")
-                                send_cmd(f"cartjogvel rx {wx:.4f}")
-                                send_cmd(f"cartjogvel ry {wy:.4f}")
+                                send_cmd(f"cartjogvel rx {wx*1:.4f}")
+                                send_cmd(f"cartjogvel ry {wy*1:.4f}")
                                 send_cmd(f"cartjogvel rz {wz:.4f}")
 
                             last_pos, last_rot, last_time = pos, rot, loop_start

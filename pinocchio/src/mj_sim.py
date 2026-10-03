@@ -10,17 +10,18 @@ import math
 running = True
 latest_targets = [0.0] * 6
 latest_gripper = 0.0
-
+# ROBOT_IP = "192.168.50.10"
+ROBOT_IP = "rpi.local"
 def udp_telemetry_listener():
     """Listens to the C++ app's 31Hz JSON telemetry broadcast."""
     global latest_targets, latest_gripper
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0)) 
+    sock.bind(("", 0))  # local address; the Pi replies to whatever port we send from
     sock.settimeout(0.1)
     
-    # Send ping to register this script with the C++ udpThread
-    server_addr = ("127.0.0.1", 5005)
+    # Resolve once: "rpi.local" goes through mDNS, which is slow to repeat per packet
+    server_addr = (socket.gethostbyname(ROBOT_IP), 5005)
     sock.sendto(b"ping", server_addr)
     last_ping_time = 0
     

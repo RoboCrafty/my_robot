@@ -18,7 +18,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 # --- Robot connection --------------------------------------------------------
-ROBOT_IP = "192.168.0.103"
+ROBOT_IP = "192.168.50.10"
 ROBOT_PORT = 5005
 robot_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -28,7 +28,7 @@ def send_cmd(cmd: str) -> None:
 
 
 # --- iOS app connection -------------------------------------------------------
-APP_PORT = 8000
+APP_PORT = 9001
 GRIPPER_POS_MAX = 140  # see pinocchio/src/protocol.h
 IDENTITY_QUAT = np.array([0.0, 0.0, 0.0, 1.0])  # scipy quat order: x, y, z, w
 
