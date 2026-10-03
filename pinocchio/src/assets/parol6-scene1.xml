@@ -1,8 +1,16 @@
 <mujoco>
     <include file="parol6-PGripper-Base.xml"/>
+    <asset>
+      <material name="cube_material" rgba="0.9 0.2 0.1 1" />
+    </asset>
     <worldbody>
     <!-- Static scene cameras -->
     <camera name="top_down_cam" pos="0 0 1" zaxis="0 0 1" fovy="75"/>
+    <!-- Small pick-and-place cube, 3cm edge -->
+    <body name="cube" pos="0.25 0 0.015">
+      <joint name="cube_joint" type="free" />
+      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" material="cube_material" mass="0.05" friction="1 0.005 0.0001" />
+    </body>
   </worldbody>
 
 </mujoco>
