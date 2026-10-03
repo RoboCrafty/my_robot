@@ -239,6 +239,7 @@ kbd {
 }
 .reach.ok { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .reach.no { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
+.reach.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); }
 .reach-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 .delta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
 .delta-v { display: block; font: 500 30px/1 var(--mono); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
@@ -256,6 +257,11 @@ kbd {
 .go small { color: var(--muted); font-size: 11.5px; }
 .go.previewing { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .go.previewing svg { color: var(--accent); }
+.go.off { cursor: not-allowed; }
+.go.off > * { opacity: 0.45; }
+.go.blocked small { color: var(--bad); }
+.go.blocked.previewing { border-color: color-mix(in srgb, var(--bad) 45%, transparent); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.go.blocked.previewing svg { color: var(--bad); }
 .auto-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; }
 .card-foot { display: flex; justify-content: space-between; margin-top: 12px; }
 .ghost-btn {
@@ -506,17 +512,58 @@ input[type='range']:active::-webkit-slider-thumb { transform: scale(1.15); }
     .btn:not(.accent):not(.danger):not(:disabled):hover { background: var(--fill-2); border-color: var(--edge); }
     .btn.ghost:not(:disabled):hover { color: var(--text); }
     .btn.accent:hover, .btn.danger:hover, .estop:hover { filter: brightness(1.08); }
-    .go:not(:disabled):hover { background: var(--fill-2); }
+    .go:not(.off):hover { background: var(--fill-2); }
     .jogbtn:hover, .jstep:not(:disabled):hover, .motor:hover { color: var(--text); border-color: var(--edge); background: var(--fill-2); }
     .item:hover { border-color: var(--edge); background: var(--fill-2); }
     .node:not(.sel):hover { background: var(--fill); }
     .variant-list li:hover { background: var(--fill-2); color: var(--text); }
 }
 
+/* camera-controls clears touch-action when disabled mid-gesture (gizmo drags),
+   which hands the touch to the browser and cancels the drag. Pin it. */
+.stage canvas { touch-action: none !important; }
+
+/* iOS zooms the page into any input under 16px. */
+@media (pointer: coarse) {
+    input, select, .num, .text { font-size: 16px; }
+}
+
 @media (max-width: 899px) {
-    .panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: 48vh; border-radius: 22px; }
-    .app.with-panel .dock, .app.with-panel .readout, .app.with-panel .jog-hud { display: none; }
-    .pill-group, .views { display: none; }
-    .readout { top: 72px; left: 12px; width: 200px; }
-    .target-card { left: 12px; right: 12px !important; width: auto; top: 72px; }
+    .topbar { padding-left: 14px; gap: 8px; }
+    .brand-sub { font-size: 0; gap: 0; }
+    .brand-sub .dot { width: 7px; height: 7px; }
+    .mark { width: 26px; height: 26px; }
+    .top-actions { gap: 6px; }
+    .pill-group, .views, .dock-sep, .hint { display: none; }
+    .round, .mode-chip, .estop { height: 38px; }
+    .round { width: 38px; }
+    .estop { padding: 0 14px 0 12px; }
+
+    .panel {
+        top: auto; left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom));
+        width: auto; height: 46dvh; border-radius: 22px;
+    }
+    .tab { font-size: 10.5px; padding: 7px 0 6px; }
+    .pane { padding: 4px 14px 18px; }
+
+    .readout { top: 64px; left: 10px; width: 188px; padding: 10px 12px; }
+    .readout .sigma { display: none; }
+    .app.with-panel .readout { display: none; }
+
+    .dock { bottom: max(14px, env(safe-area-inset-bottom)); }
+    .app.with-panel .dock { bottom: calc(46dvh + max(8px, env(safe-area-inset-bottom)) + 10px); }
+    .dock-btn { padding: 0 12px; white-space: nowrap; }
+    .dock-btn kbd { display: none; }
+    .jog-hud { bottom: calc(46dvh + 76px); }
+
+    /* Moving the tool: the card takes the bottom sheet's place. */
+    .app.mode-tcp .panel { display: none; }
+    .app.mode-tcp .dock { bottom: calc(min(360px, 45dvh) + 10px); }
+    .target-card {
+        top: auto; left: 8px; right: 8px !important; bottom: max(8px, env(safe-area-inset-bottom));
+        width: auto; max-height: min(360px, 45dvh); overflow-y: auto; padding: 14px; border-radius: 22px;
+        transform-origin: bottom center;
+    }
+    .delta-v { font-size: 24px; }
+    .target-card .num-grid.compact { display: none; }
 }

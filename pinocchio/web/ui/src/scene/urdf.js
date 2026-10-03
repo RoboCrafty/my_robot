@@ -86,13 +86,20 @@ export function useUrdf(name) {
             // the visible models.
             const scratch = robot.clone();
 
+            // Same bound as Kinematics::computeRobotReachFromModel: sum of the
+            // joint offsets from the tool back to the base.
+            let maxReach = 0;
+            for (let o = robot.links[TIP_LINK]; o && o !== robot; o = o.parent) {
+                if (o.isURDFJoint) maxReach += o.position.length();
+            }
+
             useStore.setState({
                 limits: JOINT_NAMES.map((n) => {
                     const l = robot.joints[n].limit;
                     return { lower: (l?.lower ?? -Math.PI) * 180 / Math.PI, upper: (l?.upper ?? Math.PI) * 180 / Math.PI };
                 }),
             });
-            setModels({ robot, ghost, scratch });
+            setModels({ robot, ghost, scratch, maxReach });
         };
         loader.load(`/assets/${name}`, (r) => { robot = r; });
         return () => { cancelled = true; };

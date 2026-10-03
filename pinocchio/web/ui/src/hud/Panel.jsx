@@ -45,14 +45,8 @@ export function Panel() {
                         ))}
                     </nav>
                     <div className="pane-scroll">
-                        {/* Tabs switch often, so only a quick cross-fade. */}
-                        <AnimatePresence mode="wait" initial={false}>
-                            <motion.div key={current[0]} className="pane"
-                                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                                transition={{ duration: 0.1 }}>
-                                <Pane />
-                            </motion.div>
-                        </AnimatePresence>
+                        {/* Tabs switch often: swap instantly, no animation. */}
+                        <div className="pane" key={current[0]}><Pane /></div>
                     </div>
                 </motion.aside>
             )}

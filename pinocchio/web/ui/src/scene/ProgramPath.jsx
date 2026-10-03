@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
 import { useStore } from '../store.js';
 import { programMoves } from '../program.js';
@@ -20,6 +20,7 @@ export function ProgramPath({ scratch }) {
     const runNode = useStore((s) => s.prog.node);
     const hoverWp = useStore((s) => s.hoverWp);
     const light = useStore((s) => s.prefs.theme) === 'light';
+    const invalidate = useThree((s) => s.invalidate);
     const active = tab === 'points' || tab === 'program';
 
     const lines = useMemo(() => ({
@@ -61,19 +62,20 @@ export function ProgramPath({ scratch }) {
         }
         if (n >= 2) { setLine(lines.path, flat, colors); lines.path.visible = true; }
         else lines.path.visible = false;
-    }, [active, tab, poses, nodes, scratch, lines]);
+        invalidate();
+    }, [active, tab, poses, nodes, scratch, lines, invalidate]);
 
     // Highlight the running step, else the selected one.
     useEffect(() => {
         const seg = active && segOf.current[runNode || sel];
         if (seg) { setLine(lines.seg, seg); lines.seg.visible = true; }
         else lines.seg.visible = false;
-    }, [active, sel, runNode, nodes, poses, lines]);
+        invalidate();
+    }, [active, sel, runNode, nodes, poses, lines, invalidate]);
 
-    useFrame(({ size }, dt) => {
+    useFrame(({ size }) => {
         lines.path.material.resolution.set(size.width, size.height);
         lines.seg.material.resolution.set(size.width, size.height);
-        lines.path.material.dashOffset -= dt * 0.04;
     });
 
     if (!active) return null;

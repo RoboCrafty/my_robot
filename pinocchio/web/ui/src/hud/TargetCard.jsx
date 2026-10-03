@@ -47,9 +47,17 @@ function GhostBody({ variant }) {
     const plan = useStore((s) => s.plan);
     const preview = useStore((s) => s.preview);
     const auto = useStore((s) => s.prefs.autoMotion);
-    const ok = !!plan?.reachable;
     const arrived = plan && plan.dist < 1.5 && plan.ang < 0.5;
     const hoverPath = (p) => ({ onPointerEnter: () => useStore.setState({ preview: p }), onFocus: () => useStore.setState({ preview: p }) });
+    const chip = !plan ? ['no', '—']
+        : plan.jointOk && plan.linOk ? ['ok', 'Reachable']
+        : plan.jointOk ? ['warn', 'Joint move only']
+        : plan.linOk ? ['warn', 'Linear move only']
+        : ['no', 'Out of reach'];
+    const moves = [
+        ['j', 'move', 'curve', 'Joint move', 'Fastest, curved path', plan?.jointOk, 'No joint solution from here'],
+        ['l', 'movel', 'line', 'Linear move', plan?.linWhy || 'Straight tool path', plan?.linOk, plan?.linWhy],
+    ];
 
     return (
         <>
@@ -62,7 +70,7 @@ function GhostBody({ variant }) {
                     <span className="delta-v">{plan ? plan.ang.toFixed(1) : '—'}</span>
                     <span className="delta-u">° turn</span>
                 </div>
-                <span className={`reach ${ok ? 'ok' : 'no'}`}><span className="reach-dot" />{ok ? 'Reachable' : 'Out of reach'}</span>
+                <span className={`reach ${chip[0]}`}><span className="reach-dot" />{chip[1]}</span>
             </div>
 
             <dl className="num-grid compact">
@@ -83,15 +91,19 @@ function GhostBody({ variant }) {
                 </div>
             ) : (
                 <div className="go-row">
-                    {[['j', 'move', 'curve', 'Joint move', 'Fastest, curved path'],
-                      ['l', 'movel', 'line', 'Linear move', 'Straight tool path']].map(([p, verb, icon, label, sub]) => (
-                        <motion.button key={p} className={`go ${preview === p ? 'previewing' : ''}`}
-                            disabled={!ok || arrived} whileTap={{ scale: 0.97 }}
-                            onClick={() => commitPlan(verb)} {...hoverPath(p)}>
-                            <Icon name={icon} size={18} />
-                            <span><b>{label}</b><small>{sub}</small></span>
-                        </motion.button>
-                    ))}
+                    {moves.map(([p, verb, icon, label, sub, can, why]) => {
+                        // aria-disabled, not disabled: a blocked button must still
+                        // take hover so its (red) path explains why.
+                        const off = !can || arrived;
+                        return (
+                            <motion.button key={p} className={`go ${preview === p ? 'previewing' : ''} ${off ? 'off' : ''} ${!can && plan ? 'blocked' : ''}`}
+                                aria-disabled={off} whileTap={off ? undefined : { scale: 0.97 }}
+                                onClick={() => { if (!off) commitPlan(verb); }} {...hoverPath(p)}>
+                                <Icon name={icon} size={18} />
+                                <span><b>{label}</b><small>{can || !plan ? sub : why}</small></span>
+                            </motion.button>
+                        );
+                    })}
                 </div>
             )}
 

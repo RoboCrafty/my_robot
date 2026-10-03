@@ -48,12 +48,14 @@ export function App() {
 
     return (
         <MotionConfig reducedMotion="user" transition={{ type: 'spring', duration: 0.35, bounce: 0.12 }}>
-            <div className={`app ${panel ? 'with-panel' : ''}`}>
+            <div className={`app ${panel ? 'with-panel' : ''} mode-${mode}`}>
                 <div className="stage">
+                    {/* Render on demand: a still arm should cost no GPU at all. */}
                     <Canvas
                         key={quality}
+                        frameloop="demand"
                         shadows={!cinematic}
-                        dpr={[1, 2]}
+                        dpr={cinematic ? [1, 2] : [1, 1.5]}
                         gl={{ antialias: !cinematic, powerPreference: 'high-performance' }}
                         camera={{ fov: 40, near: 0.01, far: 40, position: [1, 0.8, 1] }}
                         onCreated={({ gl }) => { if (!cinematic) gl.toneMapping = THREE.AgXToneMapping; }}

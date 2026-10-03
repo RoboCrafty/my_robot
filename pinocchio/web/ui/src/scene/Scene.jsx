@@ -4,7 +4,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Billboard, CameraControls, ContactShadows, Environment, Grid, Lightformer } from '@react-three/drei';
 import { Bloom, EffectComposer, N8AO, ToneMapping, Vignette } from '@react-three/postprocessing';
 import { ToneMappingMode } from 'postprocessing';
-import { live, useStore } from '../store.js';
+import { live, setInvalidate, useStore } from '../store.js';
 import { ACCENT, JAW_JOINTS, JOINT_NAMES, TIP_LINK, useUrdf } from './urdf.js';
 import { haloTexture, makeLine, setLine } from './lines.js';
 import { TargetGizmo } from './TargetGizmo.jsx';
@@ -14,6 +14,7 @@ import { ProgramPath } from './ProgramPath.jsx';
 const DEG = Math.PI / 180;
 const GRIP_MAX = 140;
 export const PANEL_W = 392;
+const BASE_FOV = 40;
 const _v = new THREE.Vector3();
 
 export const THEMES = {
@@ -65,6 +66,7 @@ export function Scene() {
             {models && mode !== 'tcp' && <GhostOff ghost={models.ghost} />}
             <Camera robot={models?.robot} />
             <ViewOffset />
+            <Invalidator />
 
             {cinematic && (
                 <EffectComposer multisampling={4}>
@@ -127,30 +129,41 @@ function GhostOff({ ghost }) {
     return null;
 }
 
+// The canvas renders on demand; controller state arrives outside React, so
+// hand the store a way to request a frame when the arm actually moves.
+function Invalidator() {
+    const invalidate = useThree((s) => s.invalidate);
+    const get = useThree((s) => s.get);
+    const open = useStore((s) => s.prefs.panel);
+    useEffect(() => { setInvalidate(invalidate); }, [invalidate]);
+    useEffect(() => { invalidate(); }, [open, invalidate]);
+    useEffect(() => { if (window.parol) window.parol.r3f = get; }, [get]);
+    return null;
+}
+
 // The grab point: a glowing bead on the tool tip. Clicking it is the obvious
 // "move the tool" affordance; hidden while a TCP control owns the tip.
 function TcpOrb({ robot, theme }) {
     const mode = useStore((s) => s.mode);
     const g = useRef();
-    const ring = useRef();
     const hover = useRef(false);
+    const invalidate = useThree((s) => s.invalidate);
     const tip = robot.links[TIP_LINK];
     const core = useMemo(() => new THREE.Color(ACCENT).multiplyScalar(4), []);
 
-    useFrame(({ clock }, dt) => {
+    useFrame(({ invalidate }, dt) => {
         tip.getWorldPosition(g.current.position);
-        const s = THREE.MathUtils.damp(g.current.scale.x, hover.current ? 1.45 : 1, 18, dt);
+        const goal = hover.current ? 1.45 : 1;
+        const s = THREE.MathUtils.damp(g.current.scale.x, goal, 18, dt);
         g.current.scale.setScalar(s);
-        const t = (clock.elapsedTime % 2.4) / 2.4;
-        ring.current.scale.setScalar(1 + t * 0.9);
-        ring.current.material.opacity = (1 - t) * 0.55;
+        if (Math.abs(s - goal) > 0.002) invalidate();
     });
 
     return (
         <group ref={g} visible={mode !== 'tcp'}>
             <mesh
-                onPointerOver={(e) => { e.stopPropagation(); hover.current = true; document.body.style.cursor = 'pointer'; }}
-                onPointerOut={() => { hover.current = false; document.body.style.cursor = ''; }}
+                onPointerOver={(e) => { e.stopPropagation(); hover.current = true; document.body.style.cursor = 'pointer'; invalidate(); }}
+                onPointerOut={() => { hover.current = false; document.body.style.cursor = ''; invalidate(); }}
                 onClick={(e) => { e.stopPropagation(); useStore.setState({ mode: 'tcp' }); }}
             >
                 <sphereGeometry args={[0.022, 12, 12]} />
@@ -167,9 +180,9 @@ function TcpOrb({ robot, theme }) {
                 />
             </sprite>
             <Billboard>
-                <mesh ref={ring}>
+                <mesh>
                     <ringGeometry args={[0.011, 0.0125, 48]} />
-                    <meshBasicMaterial color={ACCENT} transparent depthWrite={false} toneMapped={false} />
+                    <meshBasicMaterial color={ACCENT} transparent opacity={0.45} depthWrite={false} toneMapped={false} />
                 </mesh>
             </Billboard>
         </group>
@@ -196,7 +209,7 @@ function Trail({ robot, theme }) {
 
     useEffect(() => { pts.current = []; }, [nonce, on]);
 
-    useFrame(({ clock, size }) => {
+    useFrame(({ clock, size, invalidate }) => {
         const { core, glow } = lines;
         core.material.resolution.set(size.width, size.height);
         glow.material.resolution.set(size.width, size.height);
@@ -231,6 +244,7 @@ function Trail({ robot, theme }) {
         setLine(glow, pos, c2);
         setLine(core, pos, c1);
         core.visible = glow.visible = true;
+        invalidate();   // keep fading until the last point ages out
     });
 
     return (
@@ -246,24 +260,32 @@ function Camera({ robot }) {
     const fit = useRef(null);
     const view = useStore((s) => s.view);
     const nonce = useStore((s) => s.viewNonce);
+    const size = useThree((s) => s.size);
 
     useEffect(() => {
         if (!robot || fit.current) return;
-        // Include the Z-up parent, which hasn't rendered (and so updated) yet.
-        robot.updateWorldMatrix(true, true);
-        const box = new THREE.Box3().setFromObject(robot);
-        const center = box.getCenter(new THREE.Vector3());
-        const r = box.getSize(new THREE.Vector3()).length() * 0.5;
-        fit.current = { center, dist: r / Math.sin(20 * DEG) * 1.5 };
-        ref.current.minDistance = r * 0.4;
-        ref.current.maxDistance = r * 12;
+        fit.current = true;
         go(false);
     }, [robot]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => { if (fit.current) go(true); }, [nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
     function go(animate) {
-        const { center: c, dist } = fit.current;
+        // Measure the arm as it stands now: an outstretched arm needs more room.
+        // Include the Z-up parent, which may not have rendered (and so updated) yet.
+        robot.updateWorldMatrix(true, true);
+        const box = new THREE.Box3().setFromObject(robot);
+        const c = box.getCenter(new THREE.Vector3());
+        const r = box.getSize(new THREE.Vector3()).length() * 0.5;
+        ref.current.minDistance = r * 0.4;
+        ref.current.maxDistance = r * 12;
+        // Fit the unobstructed part of the canvas. Pixel scale is set by the full
+        // height (see ViewOffset), so both extents are measured against H.
+        const { width: W, height: H } = size;
+        const off = viewOffsetGoal(W, H, useStore.getState());
+        const k = W >= 900 ? Math.min((W - off) / H, 1) : Math.min(W / H, (H - off) / H);
+        const half = Math.atan(Math.tan(BASE_FOV / 2 * DEG) * k) / DEG;
+        const dist = r / Math.sin(half * DEG) * 1.1;
         const d = new THREE.Vector3(...VIEWS[view]).normalize().multiplyScalar(dist);
         ref.current.setLookAt(c.x + d.x, c.y + d.y, c.z + d.z, c.x, c.y, c.z, animate);
     }
@@ -274,19 +296,30 @@ function Camera({ robot }) {
 // The side panel floats over the canvas (so the glass has something to blur),
 // which would leave the arm off-centre behind it. Shift the projection instead
 // of the camera, so orbiting still pivots on the arm. On narrow screens the
-// panel is a bottom sheet, so the shift is vertical.
+// panel (or the tool card) is a bottom sheet, so the shift is vertical.
+function viewOffsetGoal(W, H, s) {
+    if (W >= 900) return s.prefs.panel ? PANEL_W + 16 : 0;
+    if (s.mode === 'tcp') return Math.round(Math.min(360, H * 0.45));
+    return s.prefs.panel ? Math.round(H * 0.46 + 8) : 0;
+}
+
 function ViewOffset() {
     const open = useStore((s) => s.prefs.panel);
+    const mode = useStore((s) => s.mode);
     const cur = useRef(0);
     const last = useRef('');
+    const invalidate = useThree((s) => s.invalidate);
+    useEffect(() => { invalidate(); }, [open, mode, invalidate]);
     useFrame(({ camera, size }, dt) => {
         const wide = size.width >= 900;
-        const goal = !open ? 0 : wide ? PANEL_W + 16 : Math.round(size.height * 0.48 + 8);
+        const goal = viewOffsetGoal(size.width, size.height, useStore.getState());
         cur.current = THREE.MathUtils.damp(cur.current, goal, 10, dt);
         if (Math.abs(cur.current - goal) < 0.5) cur.current = goal;
+        else invalidate();
         const off = Math.round(cur.current);
         const key = `${off}:${wide}:${size.width}:${size.height}:${camera.aspect}`;
         if (key === last.current) return;
+        camera.fov = BASE_FOV;
         if (off === 0) {
             camera.clearViewOffset();
             camera.aspect = size.width / size.height;
@@ -294,8 +327,12 @@ function ViewOffset() {
             camera.aspect = (size.width + off) / size.height;
             camera.setViewOffset(size.width + off, size.height, off, 0, size.width, size.height);
         } else {
-            camera.aspect = size.width / (size.height + off);
-            camera.setViewOffset(size.width, size.height + off, 0, off, size.width, size.height);
+            // A taller virtual frame would magnify the arm; widen the FOV to match
+            // so the visible part keeps the same scale.
+            const full = size.height + off;
+            camera.fov = 2 * Math.atan(Math.tan(BASE_FOV / 2 * DEG) * full / size.height) / DEG;
+            camera.aspect = size.width / full;
+            camera.setViewOffset(size.width, full, 0, off, size.width, size.height);
         }
         camera.updateProjectionMatrix();
         last.current = `${off}:${wide}:${size.width}:${size.height}:${camera.aspect}`;

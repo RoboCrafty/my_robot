@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { R2D, cartJogVel, stopEverything, useStore } from '../store.js';
 import { AXIS_COLORS, TIP_LINK } from './urdf.js';
@@ -28,8 +28,11 @@ export function RateHandles({ robot }) {
         { axis: 3 + a, kind: 'rot', mat: new THREE.MeshBasicMaterial({ color: c, depthTest: false, transparent: true, opacity: 0.55, toneMapped: false }) },
     ]), []);
     const refs = useRef({});
+    const hoverAxis = useStore((s) => s.hoverAxis);
+    const invalidate = useThree((s) => s.invalidate);
+    useEffect(() => { invalidate(); }, [hoverAxis, invalidate]);
 
-    useFrame((_, dt) => {
+    useFrame((state, dt) => {
         tip.getWorldPosition(_v);
         g.current.parent.worldToLocal(g.current.position.copy(_v));
         if (frame === 'tool') {
@@ -41,6 +44,7 @@ export function RateHandles({ robot }) {
         }
         const hover = useStore.getState().hoverAxis;
         const d = drag.current;
+        let settling = false;
         for (const h of handles) {
             const o = refs.current[h.axis];
             if (!o) continue;
@@ -48,13 +52,16 @@ export function RateHandles({ robot }) {
             const dim = (d || hover != null) && !active;
             const mag = d && d.axis === h.axis ? Math.min(1, Math.abs(d.rate)) : 0;
             const base = h.kind === 'rot' ? 0.55 : 0.95;
-            h.mat.opacity = THREE.MathUtils.damp(h.mat.opacity, dim ? base * 0.2 : active ? 1 : base, 16, dt);
+            const op = dim ? base * 0.2 : active ? 1 : base;
+            h.mat.opacity = THREE.MathUtils.damp(h.mat.opacity, op, 16, dt);
             // Grow with the commanded rate so a short drag visibly reads as slow.
             const goal = h.kind === 'lin' ? 1 + mag * 0.9 : 1 + mag * 0.3 + (active ? 0.06 : 0);
             const sy = THREE.MathUtils.damp(o.scale.y, goal, 16, dt);
             if (h.kind === 'lin') o.scale.set(1, sy, 1);
             else o.scale.setScalar(sy);
+            if (Math.abs(sy - goal) > 0.002 || Math.abs(h.mat.opacity - op) > 0.005) settling = true;
         }
+        if (settling) state.invalidate();
     });
 
     const onDown = (h) => (e) => {
@@ -82,6 +89,7 @@ export function RateHandles({ robot }) {
         const rate = Math.max(-1, Math.min(1, px / DRAG_FULL_SCALE_PX));
         if (Math.abs(rate - d.rate) < 0.02) return;
         d.rate = rate;
+        invalidate();
         const S = useStore.getState().S;
         cartJogVel(d.axis, rate * (d.axis < 3 ? S.cartLinSpeed : S.cartAngSpeed / R2D));
         useStore.setState({ jogHud: { axis: d.axis, rate } });

@@ -29,6 +29,11 @@ const zeros = (n) => new Array(n).fill(0);
 // frame. Kept out of React so 50 Hz joint updates don't re-render the HUD.
 export const live = { q: zeros(NJ), tcp: zeros(6), sigma: 1, busy: false, grip: 0 };
 
+let invalidate = () => {};
+export const setInvalidate = (fn) => { invalidate = fn; };
+// Encoder noise must not keep the GPU busy: ignore sub-0.001° changes.
+const moved = (a, b) => a.some((v, i) => Math.abs(v - b[i]) > 1e-3);
+
 export const useStore = create(() => ({
     conn: 'connecting',
     urdf: null,
@@ -95,11 +100,13 @@ export function send(o) {
 export const cmd = (line) => send({ type: 'cmd', line });
 
 function onState(m) {
+    const q0 = live.q, g0 = live.grip;
     if (Array.isArray(m.pos)) live.q = m.pos.map(Number);
     if (Array.isArray(m.tcp)) live.tcp = m.tcp.map(Number);
     if (typeof m.sigma === 'number') live.sigma = m.sigma;
     live.busy = !!m.busy;
     if (typeof m.grip === 'number') live.grip = typeof m.grip_ack === 'number' ? m.grip_ack : m.grip;
+    if (moved(live.q, q0) || live.grip !== g0) invalidate();
 
     const s = useStore.getState();
     const patch = {};
@@ -236,7 +243,14 @@ export function setFrame(v) {
 // ------------------------------------------------------------- misc actions
 export function commitPlan(verb) {
     const plan = useStore.getState().plan;
-    if (!plan?.reachable) return;
+    if (!plan) return;
+    const ok = verb === 'movel' ? plan.linOk : plan.jointOk;
+    if (!ok) {
+        toast.warning(verb === 'movel' ? 'Linear move not possible' : 'Joint move not possible', {
+            id: 'blocked', description: verb === 'movel' ? plan.linWhy : 'No joint solution from the current pose',
+        });
+        return;
+    }
     cmd(`${verb} ${[...plan.pos, ...plan.rpy].map((v) => v.toFixed(5)).join(' ')}`);
 }
 
