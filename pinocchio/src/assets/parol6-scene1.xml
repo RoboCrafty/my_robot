@@ -9,7 +9,7 @@
     <!-- Small pick-and-place cube, 3cm edge -->
     <body name="cube" pos="0.25 0 0.015">
       <joint name="cube_joint" type="free" />
-      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" material="cube_material" mass="0.05" friction="1 0.005 0.0001" />
+      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" material="cube_material" mass="0.05" friction="1 0.005 0.0001" condim="4" />
     </body>
   </worldbody>
 

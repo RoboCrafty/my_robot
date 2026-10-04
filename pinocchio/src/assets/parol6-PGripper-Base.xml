@@ -1,5 +1,6 @@
 <mujoco model="parol6">
-<option timestep="0.001" iterations="50" integrator="implicitfast"/>
+<!-- elliptic cone + impratio>1 makes friction act like a hard constraint, which stops grasped objects creeping out -->
+<option timestep="0.001" iterations="50" integrator="implicitfast" cone="elliptic" impratio="10" noslip_iterations="5"/>
   <default>
     <default class="robot">
       <!-- Scaled down armature and damping for a lightweight arm -->
@@ -58,12 +59,13 @@
                   <body name="tcp_link" pos="0 0 0.154" quat="0.7071 0 0 -0.7071" />
                   <body name="left_jaw" childclass="gripper_slide">
                     <joint name="left_jaw_joint" type="slide" range="0.0 0.04" axis="0 1 0"/>
-                    <geom name="left_jaw_collision" pos="0.0 0.001 0.154" quat="0.5004 -0.5 -0.4996 0.5" type="mesh" mesh="left_jaw_collision_Gripper2_Jaw_1" class="collision" />
+                    <!-- Box pad instead of the full jaw mesh: the mesh is concave and MuJoCo collides against its convex hull, which touches objects well before the jaws visually close -->
+                    <geom name="left_jaw_pad_collision" pos="0 0.0015 0.144" quat="0.5004 -0.5 -0.4996 0.5" type="box" size="0.002 0.01 0.016" class="collision" friction="1.5 0.05 0.001" condim="4" solref="0.005 1" solimp="0.95 0.99 0.001" />
                     <geom name="left_jaw_visual" pos="0.0 0.001 0.154" quat="0.5004 -0.5 -0.4996 0.5" type="mesh" mesh="left_jaw_Gripper2_Jaw_1" material="Gripper2_Jaw_Material" class="visual" />
                   </body>
                   <body name="right_jaw" childclass="gripper_slide">
                     <joint name="right_jaw_joint" type="slide" range="-0.04 0.0" axis="0 1 0"/>
-                    <geom name="right_jaw_collision" pos="0.0 -0.001 0.154" quat="0.5004 -0.5 0.4996 -0.5" type="mesh" mesh="left_jaw_collision_Gripper2_Jaw_1" class="collision" />
+                    <geom name="right_jaw_pad_collision" pos="0 -0.0015 0.144" quat="0.5004 -0.5 0.4996 -0.5" type="box" size="0.002 0.01 0.016" class="collision" friction="1.5 0.05 0.001" condim="4" solref="0.005 1" solimp="0.95 0.99 0.001" />
                     <geom name="right_jaw_visual" pos="0.0 -0.001 0.154" quat="0.5004 -0.5 0.4996 -0.5" type="mesh" mesh="left_jaw_Gripper2_Jaw_1" material="Gripper2_Jaw_Material" class="visual" />
                   </body>
                 </body>
@@ -114,7 +116,7 @@
     <position name="wrist1_motor"   joint="J4" kp="100" kv="10" ctrlrange="-3.403 1.920" forcelimited="true" forcerange="-50 50"/>
     <position name="wrist2_motor"   joint="J5" kp="100" kv="10" ctrlrange="-2.007 2.007" forcelimited="true" forcerange="-50 50"/>
     <position name="wrist3_motor"   joint="J6" kp="100" kv="10" ctrlrange="-3.1 3.1" forcelimited="true" forcerange="-50 50"/>
-    <position name="left_jaw_joint" joint="left_jaw_joint" kp="500" kv="10" ctrlrange="0.0 0.027" forcelimited="true" forcerange="-50 50" />
+    <position name="left_jaw_joint" joint="left_jaw_joint" kp="3500" kv="10" ctrlrange="0.0 0.027" forcelimited="true" forcerange="-50 50" />
   </actuator>
 
   <equality>
@@ -126,7 +128,7 @@
   </visual>
   <keyframe>
     <key name="home"
-          qpos="0 0.245 0.199 1.57 0 0 0 0"/>
+          qpos="0 0.245 0.199 1.57 0 0 0 0 0.25 0 0.015 1 0 0 0"/>
 </keyframe>
 
 </mujoco>
