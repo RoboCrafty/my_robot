@@ -2,6 +2,7 @@
     <include file="parol6-PGripper-Base.xml"/>
     <asset>
       <material name="cube_material" rgba="0.9 0.2 0.1 1" />
+      <material name="green_cube_material" rgba="0.1 0.8 0.2 1" />
     </asset>
     <worldbody>
     <!-- Static scene cameras -->
@@ -9,7 +10,11 @@
     <!-- Small pick-and-place cube, 3cm edge -->
     <body name="cube" pos="0.25 0 0.015">
       <joint name="cube_joint" type="free" />
-      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" material="cube_material" mass="0.05" friction="1 0.005 0.0001" condim="4" />
+      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" material="cube_material" mass="0.05" friction="1 0.005 0.0001" condim="4" solref="0.004 1" solimp="0.95 0.99 0.001" />
+    </body>
+    <body name="green_cube" pos="0.25 0.08 0.015">
+      <joint name="green_cube_joint" type="free" />
+      <geom name="green_cube_geom" type="box" size="0.015 0.015 0.015" material="green_cube_material" mass="0.05" friction="1 0.005 0.0001" condim="4" solref="0.004 1" solimp="0.95 0.99 0.001" />
     </body>
   </worldbody>
 

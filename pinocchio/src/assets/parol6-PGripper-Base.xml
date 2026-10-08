@@ -18,7 +18,8 @@
       </default>
     </default>
     <default class="floor">
-      <geom type="plane" size="0 0 0.05" material="groundplane" />
+      <!-- default solref 0.02 let a 300 N push sink a cube 35 mm; 0.004 keeps it under 1 mm -->
+      <geom type="plane" size="0 0 0.05" material="groundplane" solref="0.004 1" solimp="0.95 0.99 0.001" />
     </default>
   </default>
   <!-- <option gravity="0 0 0"/> -->
@@ -128,7 +129,7 @@
   </visual>
   <keyframe>
     <key name="home"
-          qpos="0 0.245 0.199 1.57 0 0 0 0 0.25 0 0.015 1 0 0 0"/>
+          qpos="0 0.245 0.199 1.57 0 0 0 0 0.25 0 0.015 1 0 0 0 0.25 0.08 0.015 1 0 0 0"/>
 </keyframe>
 
 </mujoco>
