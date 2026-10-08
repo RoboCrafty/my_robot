@@ -142,6 +142,10 @@ async def index():
 # screen can never drift from the model doing the kinematics.
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+# New React UI (ui/, `npm run build`), served alongside the old one while it matures.
+UI_DIST = HERE / "ui" / "dist"
+if UI_DIST.exists():
+    app.mount("/next", StaticFiles(directory=UI_DIST, html=True), name="next")
 
 
 async def wait_for_move(timeout: float = 120.0) -> None:
