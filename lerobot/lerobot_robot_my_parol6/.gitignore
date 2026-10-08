@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+
+# Training outputs, checkpoints, captured data
+outputs/
+logs/
+wandb/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Recordings
+*.mp4
+*.mcap
+
+# Env / secrets
+.env
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
