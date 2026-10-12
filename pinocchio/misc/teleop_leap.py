@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
+import json
 import socket
 import threading
 import time
 import math
+from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 import leap
 from pynput import keyboard
 
 # --- Robot connection --------------------------------------------------------
-# ROBOT_IP = "192.168.50.10"
+# ROBOT_IP = "127.0.0.1"
 ROBOT_IP = "rpi.local"
 ROBOT_PORT = 5005
 robot_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -20,19 +22,43 @@ def send_cmd(cmd: str) -> None:
 # --- Perspective & Settings --------------------------------------------------
 # Change this based on where you are sitting relative to the robot's base!
 # 0 = Behind, 180 = In front (facing robot), 90 = Left side, -90 = Right side
-USER_YAW_OFFSET_DEG = -90.0 
+USER_YAW_OFFSET_DEG = 0
 
 # Gripper distance tuning (in millimeters)
 # Measure roughly how far apart your fingers are when you want it "Open" vs "Closed"
-FINGER_DIST_OPEN = 100.0   # mm
+FINGER_DIST_OPEN = 80.0   # mm
 FINGER_DIST_CLOSED = 25.0 # mm
 
+# --- Gripper presets ---------------------------------------------------------
+# s then 1-9: save current gripper command to that slot; 1-9: snap mode using that slot; 0: finger control
+PRESETS_FILE = Path(__file__).with_name("gripper_presets.json")
+presets: dict[str, int] = json.loads(PRESETS_FILE.read_text()) if PRESETS_FILE.exists() else {}
+
 # --- Keyboard State ----------------------------------------------------------
-key_state = {"move_pressed": False}
+key_state = {"move_pressed": False, "save_armed": False, "preset": None, "last_gripper_cmd": None}
 
 def on_key_press(key):
     if key == keyboard.Key.space:
         key_state["move_pressed"] = True
+        return
+    ch = getattr(key, "char", None)
+    if ch == "s":
+        key_state["save_armed"] = True
+    elif ch == "0":
+        key_state["preset"] = None
+        print("[GRIP] Finger control")
+    elif ch and ch in "123456789":
+        if key_state["save_armed"]:
+            key_state["save_armed"] = False
+            if key_state["last_gripper_cmd"] is not None:
+                presets[ch] = key_state["last_gripper_cmd"]
+                PRESETS_FILE.write_text(json.dumps(presets, indent=2))
+                print(f"[GRIP] Saved preset {ch} = {presets[ch]}")
+        elif ch in presets:
+            key_state["preset"] = presets[ch]
+            print(f"[GRIP] Snap mode: open hand = open, pinch = preset {ch} ({presets[ch]}). 0 = finger control")
+        else:
+            print(f"[GRIP] Preset {ch} not set (s then {ch} to save)")
 
 def on_key_release(key):
     if key == keyboard.Key.space:
@@ -112,15 +138,18 @@ YAW_ROTATION_MATRIX = np.array([
 ])
 
 # --- Teleop main loop --------------------------------------------------------
-POSITION_GAIN = 1.0
-ROTATION_GAIN = 0.6  
+POSITION_GAIN = 1.3
+ROTATION_GAIN = 1.0
 RATE_HZ = 50.0
-VEL_CAP = 0.5
-ANG_VEL_CAP = 2.0
-SMOOTHING = 0.5
-GRIPPER_SMOOTHING = 0.85  # <--- NEW: High smoothing specifically to protect the servo
-GRIPPER_EPSILON = 1
-MOTION_DEADBAND = 0.005
+VEL_CAP = 0.3
+ANG_VEL_CAP = 1.5
+SMOOTHING = 0.8
+GRIPPER_SMOOTHING = 0.7  # <--- NEW: High smoothing specifically to protect the servo
+GRIPPER_EPSILON = 1  # raw units (0-140) the target must move before a new gripper command is sent
+# Snap mode thresholds on finger openness (0 = pinched, 1 = open); the gap stops chatter at the boundary
+SNAP_CLOSE_BELOW = 0.45
+SNAP_OPEN_ABOVE = 0.55
+MOTION_DEADBAND = 0.01                                                     
 
 def main():
     send_cmd("cartframe base")
@@ -139,9 +168,11 @@ def main():
     
     smoothed_gripper_val = 0.0 # Starts closed
     last_gripper_cmd = None
+    snap_closed = False
 
     print(f"\n[SYSTEM] Ready. Perspective Yaw Offset is set to {USER_YAW_OFFSET_DEG}°")
-    print("[SYSTEM] HOLD [Spacebar] to steer the arm. Pinch index and thumb to grip.\n")
+    print("[SYSTEM] HOLD [Spacebar] to steer the arm. Pinch index and thumb to grip.")
+    print(f"[SYSTEM] Gripper: 1-9 snap to preset, s+1-9 save current width, 0 finger control. Loaded: {presets}\n")
 
     with connection.open():
         try:
@@ -154,9 +185,17 @@ def main():
                 smoothed_gripper_val = (GRIPPER_SMOOTHING * smoothed_gripper_val) + ((1.0 - GRIPPER_SMOOTHING) * target_gripper)
                 
                 gripper_cmd = 140 - int(np.clip(smoothed_gripper_val, 0.0, 1.0) * GRIPPER_POS_MAX)
-                if last_gripper_cmd is None or abs(gripper_cmd - last_gripper_cmd) > GRIPPER_EPSILON:
+                if key_state["preset"] is not None:
+                    if snap_closed and smoothed_gripper_val > SNAP_OPEN_ABOVE:
+                        snap_closed = False
+                    elif not snap_closed and smoothed_gripper_val < SNAP_CLOSE_BELOW:
+                        snap_closed = True
+                    gripper_cmd = key_state["preset"] if snap_closed else 0
+                at_limit = gripper_cmd in (0, GRIPPER_POS_MAX) and gripper_cmd != last_gripper_cmd
+                if last_gripper_cmd is None or abs(gripper_cmd - last_gripper_cmd) >= GRIPPER_EPSILON or at_limit:
                     send_cmd(f"gripper {gripper_cmd}")
                     last_gripper_cmd = gripper_cmd
+                    key_state["last_gripper_cmd"] = gripper_cmd
 
                 # --- Arm Control ---
                 if enabled:
