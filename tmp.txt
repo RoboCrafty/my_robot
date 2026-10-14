@@ -1,0 +1,1 @@
+uv run shift_actions.py RoboCrafty/RoboCrafty/parol6_replay_test RoboCrafty/RoboCrafty/parol6_replay_test_shift1 --k 1

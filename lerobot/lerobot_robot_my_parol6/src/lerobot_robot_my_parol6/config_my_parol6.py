@@ -21,6 +21,14 @@ class myParol6Config(RobotConfig):
     port: int = 5005
     # True: read cameras from mj_sim.py's MuJoCo render stream instead of USB cameras
     sim: bool = False
+    # Divide every camera frame's width/height by this before it reaches the dataset/policy (2: 1280x720 -> 640x360).
+    # Cameras still open at their native mode; the Osmo Action 4 only offers 720p/1080p.
+    downscale: int = 1
+    # Per-camera override of `downscale`, e.g. {"cam_1": 2} to shrink only cam_1.
+    downscales: dict[str, int] = field(default_factory=dict)
+    # Per-camera crop [x, y, w, h] in native (post-rotation) pixels, applied before downscale: a digital zoom that keeps
+    # full detail, e.g. {"cam_2": [320, 0, 640, 480]}. Must be identical for recording and rollout.
+    crops: dict[str, list[int]] = field(default_factory=dict)
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "cam_1": OpenCVCameraConfig(
@@ -28,10 +36,10 @@ class myParol6Config(RobotConfig):
                 fps=30,
                 width=1280,
                 height=720,
-                rotation=Cv2Rotation.ROTATE_180,
+                # rotation=Cv2Rotation.ROTATE_180,
             ),
             "cam_2": OpenCVCameraConfig(
-                index_or_path=2,
+                index_or_path=1,
                 # Iriun on AVFoundation always opens 720p at 60 fps; recording still samples at 30
                 fps=60,
                 width=1280,

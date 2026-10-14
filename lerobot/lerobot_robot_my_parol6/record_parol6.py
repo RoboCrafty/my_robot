@@ -44,6 +44,9 @@ def parse_args():
     p.add_argument("--stacked", action="store_true", help="sim reset starts with the cubes stacked")
     p.add_argument("--root", default=None, help="local dataset dir (default: HF_LEROBOT_HOME/<repo-id>)")
     p.add_argument("--resume", action="store_true", help="append episodes to an existing dataset")
+    p.add_argument("--downscale", type=int, default=1, help="divide camera width/height by this (2: 720p -> 640x360)")
+    p.add_argument("--crops", type=json.loads, default={}, help='per-camera crop, e.g. \'{"cam_2": [320, 0, 640, 480]}\'')
+    p.add_argument("--downscales", type=json.loads, default={}, help='per-camera downscale, e.g. \'{"cam_1": 2}\'')
     return p.parse_args()
 
 
@@ -73,7 +76,7 @@ def main():
     scene_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     scene_sock.settimeout(1.0)
 
-    robot = myParol6(myParol6Config(host=args.host, sim=args.sim))
+    robot = myParol6(myParol6Config(host=args.host, sim=args.sim, downscale=args.downscale, crops=args.crops, downscales=args.downscales))
     robot.connect()
 
     features = {
@@ -111,7 +114,7 @@ def main():
     poses_file = Path(dataset.root) / "meta" / "sim_cube_poses.json"
 
     def reset_robot_and_scene():
-        robot.send_cmd("ready")
+        robot.send_cmd("0 -50 50 4 44 3")
         robot.send_cmd(f"gripper {GRIPPER_OPEN}")
         time.sleep(0.3)  # let the controller flag the move as busy
         while robot.get_status()["busy"]:

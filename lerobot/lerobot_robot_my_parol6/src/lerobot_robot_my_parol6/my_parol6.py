@@ -1,4 +1,5 @@
 import json, socket, threading, time
+import cv2
 from lerobot.robots.robot import Robot
 from lerobot.cameras.utils import make_cameras_from_configs
 
@@ -26,11 +27,18 @@ class  myParol6(Robot):
             "gripper.pos": float,
         }
 
+    def _downscale(self, cam: str) -> int:
+        return self.cfg.downscales.get(cam, self.cfg.downscale)
+
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
-        return {
-            cam: (self.cameras[cam].height, self.cameras[cam].width, 3) for cam in self.cameras
-        }
+        ft = {}
+        for cam in self.cameras:
+            s = self._downscale(cam)
+            crop = self.cfg.crops.get(cam)
+            w, h = (crop[2], crop[3]) if crop else (self.cameras[cam].width, self.cameras[cam].height)
+            ft[cam] = (h // s, w // s, 3)
+        return ft
 
     @property
     def observation_features(self) -> dict:
@@ -93,7 +101,14 @@ class  myParol6(Robot):
         obs = {f"joint_{i + 1}.pos": float(s["pos"][i]) for i in range(6)}
         obs["gripper.pos"] = s["grip_ack"] / 140 
         for name, cam in self.cameras.items():
-            obs[name] = cam.async_read()
+            img = cam.async_read()
+            if crop := self.cfg.crops.get(name):
+                x, y, w, h = crop
+                img = img[y:y + h, x:x + w]
+            if self._downscale(name) > 1:
+                h, w = self._cameras_ft[name][:2]
+                img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+            obs[name] = img
         return obs
 
     def get_status(self) -> dict:
