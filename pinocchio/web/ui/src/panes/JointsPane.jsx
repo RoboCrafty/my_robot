@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { NJ, cmd, jointJogStart, jointJogStop, jointStep, setJoint, setS, useStore } from '../store.js';
 import { HoldButton, Num, Section, Seg } from '../hud/ui.jsx';
 import { Icon } from '../hud/Icon.jsx';
+import { JogModeSeg } from './JogPane.jsx';
 
 export function JointsPane() {
     const S = useStore((s) => s.S);
@@ -11,6 +12,7 @@ export function JointsPane() {
     return (
         <>
             <Section>
+                <JogModeSeg />
                 <div className="tool-row">
                     <span className="muted small">Step</span>
                     <Seg size="sm" label="Joint step" value={S.selInc} onChange={(v) => setS({ selInc: v })}

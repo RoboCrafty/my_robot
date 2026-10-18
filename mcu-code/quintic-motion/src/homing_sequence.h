@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "motor_init.h"
+#include "power_monitor.h"
 
 namespace Constants{
     namespace Pins
@@ -23,10 +24,10 @@ namespace Constants{
         constexpr bool J6_HOMING_DIR = 1;
 
         constexpr uint16_t J1_HOMING_SPEED = 2000;
-        constexpr uint16_t J2_HOMING_SPEED = 5000;
-        constexpr uint16_t J3_HOMING_SPEED = 5000;
+        constexpr uint16_t J2_HOMING_SPEED = 3000;
+        constexpr uint16_t J3_HOMING_SPEED = 3000;
         constexpr uint16_t J4_HOMING_SPEED = 5000;
-        constexpr uint16_t J5_HOMING_SPEED = 1000;
+        constexpr uint16_t J5_HOMING_SPEED = 2000;
         constexpr uint16_t J6_HOMING_SPEED = 10000;
 
         // Homed position in degrees after homing sequence completes !! Positions are zerod after hominhg sequence, so these are relative to the homing switch trigger point and not final absolute positions !!
@@ -73,9 +74,31 @@ inline bool isLimitSwitchTriggered(int joint)
     }
 }
 
-inline void homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direction, uint16_t homing_speed, int16_t homed_position, float steps_per_deg)
+// Without motor power the joint never reaches its switch, so the seek would
+// spin forever -- and, once power returned, finish with the driver still at its
+// reset defaults. The power monitor runs on the other core, so it keeps
+// updating Power::ready_mask while this loop blocks.
+inline bool seekSwitch(FastAccelStepper* stepper, uint8_t joint)
+{
+    while (isLimitSwitchTriggered(joint) == false)
+    {
+        if (!Power::isReady(joint)) {
+            stepper->forceStopAndNewPosition(stepper->getCurrentPosition());
+            Serial.printf("Joint %d homing aborted: motor power lost\n", joint);
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direction, uint16_t homing_speed, int16_t homed_position, float steps_per_deg)
 {
     uint16_t slowhomingSpeed = 500;
+
+    if (!Power::isReady(joint)) {
+        Serial.printf("Joint %d homing skipped: motor power off\n", joint);
+        return false;
+    }
     
     stepper->setSpeedInHz(homing_speed);
     if(homing_direction){
@@ -87,10 +110,7 @@ inline void homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direc
     }
 
 
-    while (isLimitSwitchTriggered(joint) == false)
-    {
-        
-    }
+    if (!seekSwitch(stepper, joint)) return false;
     stepper->forceStopAndNewPosition(0);
     
     stepper->setSpeedInHz(homing_speed);
@@ -116,10 +136,7 @@ inline void homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direc
         stepper->runBackward();
     }
 
-    while (isLimitSwitchTriggered(joint) == false)
-    {
-        
-    }
+    if (!seekSwitch(stepper, joint)) return false;
 
     stepper->forceStopAndNewPosition(0);
     stepper->setSpeedInHz(homing_speed);
@@ -131,18 +148,19 @@ inline void homeAxis(FastAccelStepper* stepper, uint8_t joint, bool homing_direc
 
     
      Serial.printf("Joint %d homed! Moving to home position \n", joint);
+     return true;
 }
 
-inline void homeAxis(uint8_t joint)
+inline bool homeAxis(uint8_t joint)
 {
     switch (joint) {
-        case 1: homeAxis(steppers[0], 1, Constants::Config::J1_HOMING_DIR, Constants::Config::J1_HOMING_SPEED, Constants::Config::J1_HOMED_POSITION, Constants::Config::J1_STEPS_PER_DEG); break;
-        case 2: homeAxis(steppers[1], 2, Constants::Config::J2_HOMING_DIR, Constants::Config::J2_HOMING_SPEED, Constants::Config::J2_HOMED_POSITION, Constants::Config::J2_STEPS_PER_DEG); break;
-        case 3: homeAxis(steppers[2], 3, Constants::Config::J3_HOMING_DIR, Constants::Config::J3_HOMING_SPEED, Constants::Config::J3_HOMED_POSITION, Constants::Config::J3_STEPS_PER_DEG); break;
-        case 4: homeAxis(steppers[3], 4, Constants::Config::J4_HOMING_DIR, Constants::Config::J4_HOMING_SPEED, Constants::Config::J4_HOMED_POSITION, Constants::Config::J4_STEPS_PER_DEG); break;
-        case 5: homeAxis(steppers[4], 5, Constants::Config::J5_HOMING_DIR, Constants::Config::J5_HOMING_SPEED, Constants::Config::J5_HOMED_POSITION, Constants::Config::J5_STEPS_PER_DEG); break;
-        case 6: homeAxis(steppers[5], 6, Constants::Config::J6_HOMING_DIR, Constants::Config::J6_HOMING_SPEED, Constants::Config::J6_HOMED_POSITION, Constants::Config::J6_STEPS_PER_DEG); break;
-        default: Serial.println("Invalid joint number for homing."); break;
+        case 1: return homeAxis(steppers[0], 1, Constants::Config::J1_HOMING_DIR, Constants::Config::J1_HOMING_SPEED, Constants::Config::J1_HOMED_POSITION, Constants::Config::J1_STEPS_PER_DEG);
+        case 2: return homeAxis(steppers[1], 2, Constants::Config::J2_HOMING_DIR, Constants::Config::J2_HOMING_SPEED, Constants::Config::J2_HOMED_POSITION, Constants::Config::J2_STEPS_PER_DEG);
+        case 3: return homeAxis(steppers[2], 3, Constants::Config::J3_HOMING_DIR, Constants::Config::J3_HOMING_SPEED, Constants::Config::J3_HOMED_POSITION, Constants::Config::J3_STEPS_PER_DEG);
+        case 4: return homeAxis(steppers[3], 4, Constants::Config::J4_HOMING_DIR, Constants::Config::J4_HOMING_SPEED, Constants::Config::J4_HOMED_POSITION, Constants::Config::J4_STEPS_PER_DEG);
+        case 5: return homeAxis(steppers[4], 5, Constants::Config::J5_HOMING_DIR, Constants::Config::J5_HOMING_SPEED, Constants::Config::J5_HOMED_POSITION, Constants::Config::J5_STEPS_PER_DEG);
+        case 6: return homeAxis(steppers[5], 6, Constants::Config::J6_HOMING_DIR, Constants::Config::J6_HOMING_SPEED, Constants::Config::J6_HOMED_POSITION, Constants::Config::J6_STEPS_PER_DEG);
+        default: Serial.println("Invalid joint number for homing."); return false;
     }
 }
 
@@ -183,22 +201,26 @@ inline void finishJ6Home()
     waitUntilIdle(6);
 }
 
+inline void abortAllMotion()
+{
+    for (int i = 0; i < 6; i++) steppers[i]->forceStopAndNewPosition(steppers[i]->getCurrentPosition());
+    for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+}
+
 // The full six-axis sequence, shared by boot and the runtime rehome command so
 // the two cannot drift apart. Leaves every axis stopped at its homed angle;
-// the caller decides how to re-zero the counters.
-inline void homeAllAxes()
+// the caller decides how to re-zero the counters. Returns false (with every
+// axis stopped) if motor power is missing or drops part-way.
+inline bool homeAllAxes()
 {
-    homeAxis(1);
-    homeAxis(2);
-    homeAxis(3);
-    homeAxis(4);
-    homeAxis(6);
+    if (!homeAxis(1) || !homeAxis(2) || !homeAxis(3) || !homeAxis(4) || !homeAxis(6)) { abortAllMotion(); return false; }
     waitUntilIdle(6);   // J5's switch is only reachable once J6 has ARRIVED, not merely started moving
-    homeAxis(5);
+    if (!homeAxis(5)) { abortAllMotion(); return false; }
     waitUntilIdle(5);
     finishJ6Home();
     waitAllIdle();      // J1-J4's return moves overlap all of the wrist work above
     for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+    return Power::ready() == 0x3f;   // a driver that reset mid-sequence ran part of it unconfigured
 }
 
 // Homes ONE joint for the web UI's per-joint "home Jx" command. J5's limit
@@ -206,23 +228,24 @@ inline void homeAllAxes()
 // hardware, not software, requires this), so a solo J5 home always re-homes
 // J6 first -- the same order the full sequence uses. Homing J6 alone still
 // needs its own extra move to reach true home (see finishJ6Home).
-inline void homeJointWithDependency(uint8_t joint)
+inline bool homeJointWithDependency(uint8_t joint)
 {
     if (joint == 5) {
-        homeAxis(6);
+        if (!homeAxis(6)) { abortAllMotion(); return false; }
         waitUntilIdle(6);
-        homeAxis(5);
+        if (!homeAxis(5)) { abortAllMotion(); return false; }
         waitUntilIdle(5);
         finishJ6Home();
         steppers[5]->setCurrentPosition(0);
         steppers[4]->setCurrentPosition(0);
         restoreNormalMotion(6);
         restoreNormalMotion(5);
-        return;
+        return Power::isReady(5) && Power::isReady(6);
     }
-    homeAxis(joint);
+    if (!homeAxis(joint)) { abortAllMotion(); return false; }
     waitUntilIdle(joint);
     if (joint == 6) finishJ6Home();
     steppers[joint - 1]->setCurrentPosition(0);
     restoreNormalMotion(joint);
+    return Power::isReady(joint);
 }

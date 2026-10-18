@@ -11,6 +11,8 @@
 #include <structs.h>
 #include <gripper.h>
 #include <PacketSerial.h>
+#include <power_monitor.h>
+#include <odometer.h>
 // #include <motion_planner.h>
 
 
@@ -74,11 +76,17 @@ int32_t  queued_steps[6]      = {0, 0, 0, 0, 0, 0};        // steps already appe
 uint32_t movetimed_underruns  = 0;                         // diagnostics: queue-empty events
 int32_t tick_error[6] = {0, 0, 0, 0, 0, 0};                // Tracks accumulated timer quantization error per axis (in ticks)
 void printLimitSwitchStates();
+void handleLostDrivers();
 void setup() {
+    // Headroom for the Pi's 500 Hz stream while the loop is briefly busy (an
+    // odometer flash write, a driver enable over UART): with the default 256 B
+    // a few ms of stall would already drop frames.
+    Serial.setRxBufferSize(4096);
     Serial.begin(921600);
     Serial.setTimeout(2);
     Serial1.begin(115200, SERIAL_8N1, TMC_RX, TMC_TX);
     Serial2.begin(115200, SERIAL_8N1, TMC2_RX, TMC2_TX);
+    tmcLockInit();
 
     // Route PacketSerial over the USB UART and register the frame callback.
     packetSerial.setStream(&Serial);
@@ -89,9 +97,10 @@ void setup() {
     // // Serial.println("\n--- Initializing System ---");
     // delay(100);
 
-    initJoints(1, 1, 1, 1, 1, 1, 1);
+    uint8_t drivers_ok = initJoints(1, 1, 1, 1, 1, 1, 1);
     // initJoints(1, 0, 0, 0, 0, 0, 0);
     initLimitSwitches();
+    Power::start(drivers_ok);   // from here on, TMC UART access needs a TmcLock
 
     // --- FastAccelStepper engine + per-axis setup ---
     // Pin to core 1. The default init() leaves StepperTask unpinned, so once the
@@ -112,12 +121,23 @@ void setup() {
         }
     }
 
-    homeAllAxes();
+    Odometer::begin(STEPS_PER_DEG);
+
+    // Homing without motor power would wait forever for a switch the arm can't
+    // reach. Boot un-homed instead; the host blocks motion until a rehome.
+    bool homed = false;
+    if (Power::ready() == 0x3f) {
+        homed = homeAllAxes();
+    } else {
+        Serial.println("Motor power off -- skipping boot homing. Rehome once powered.");
+    }
 
     for (int i = 0; i < 6; i++) {
         steppers[i]->setCurrentPosition(0);
     }
     for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+    if (homed) { Power::setHomed(0x3f); Odometer::onHomed(); }
+    Odometer::resyncPositions();
     while (Serial.available()) Serial.read();   // discard anything queued during the blocking homing above
 
     Gripper::start();   // owns the radio on core 0; absent gripper is non-fatal
@@ -127,7 +147,21 @@ void setup() {
 
 PiToEspPacket rx_packet;
 EspToPiPacket tx_packet;
-uint8_t applied_motor_enable_mask = 0x3f;
+
+// A joint whose driver just lost VM (or blipped) may still have moveTimed
+// commands queued; those steps go nowhere, so drop them and re-reference the
+// queue to the counter. Runs on the loop task, which owns the steppers.
+void handleLostDrivers() {
+    uint8_t lost = Power::takeLost();
+    if (!lost) return;
+    for (int i = 0; i < 6; i++) {
+        if (!(lost & (1u << i))) continue;
+        int32_t p = steppers[i]->getCurrentPosition();
+        steppers[i]->forceStopAndNewPosition(p);
+        queued_steps[i] = p;
+        tick_error[i] = 0;
+    }
+}
 
 // Called by PacketSerial once a complete COBS frame has been received and
 // un-stuffed. Framing/resync is handled by the library; we verify the CRC16
@@ -140,6 +174,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
     if (crc != rx) return;                                     // corrupt -> ignore
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
+    handleLostDrivers();
 
     // Records the target only; the ESP-NOW frame goes out from the core-0 task
     // so the radio never delays this reply.
@@ -147,40 +182,52 @@ void onPacket(const uint8_t* buffer, size_t size) {
     Gripper::radio_wanted = !(rx_packet.flags & FLAG_RADIO_OFF);
 
     uint8_t requested_mask = rx_packet.motor_enable_mask & 0x3f;
-    uint8_t changed_mask = requested_mask ^ applied_motor_enable_mask;
-    for (int i = 0; i < 6; i++) {
-        if (changed_mask & (1u << i)) {
-            if (requested_mask & (1u << i)) {
-                turnDriverOn(i + 1);
-            } else {
-                int32_t executed_steps = steppers[i]->getCurrentPosition();
-                steppers[i]->forceStopAndNewPosition(executed_steps);
-                queued_steps[i] = executed_steps;
-                turnDriverOff(i + 1);
+    uint8_t changed_mask = requested_mask ^ Power::applied_enable_mask;
+    if (changed_mask) {
+        // Under the lock so the power monitor, which re-applies this mask when
+        // it reconfigures a driver, never sees it half-updated.
+        TmcLock lock;
+        for (int i = 0; i < 6; i++) {
+            if (changed_mask & (1u << i)) {
+                if (requested_mask & (1u << i)) {
+                    turnDriverOn(i + 1);
+                } else {
+                    int32_t executed_steps = steppers[i]->getCurrentPosition();
+                    steppers[i]->forceStopAndNewPosition(executed_steps);
+                    queued_steps[i] = executed_steps;
+                    turnDriverOff(i + 1);
+                }
             }
         }
+        Power::applied_enable_mask = requested_mask;
     }
-    applied_motor_enable_mask = requested_mask;
 
     if (rx_packet.motor_enable_mask & FLAG_REHOME) {
         uint8_t joint = (rx_packet.flags & REHOME_JOINT_MASK) >> REHOME_JOINT_SHIFT; // 0 = all six
+        bool ok = false;
         if (joint == 0) {
-            homeAllAxes();
+            ok = homeAllAxes();
             for (int i = 0; i < 6; i++) {
                 steppers[i]->setCurrentPosition(0);
                 queued_steps[i] = 0;
                 tick_error[i] = 0;
                 restoreNormalMotion(i + 1);
             }
+            if (ok) Power::setHomed(0x3f);
         } else if (joint <= 6) {
-            homeJointWithDependency(joint);              // also re-homes J6 first if joint == 5
+            ok = homeJointWithDependency(joint);         // also re-homes J6 first if joint == 5
             steppers[joint - 1]->setCurrentPosition(0);
             queued_steps[joint - 1] = 0;
             tick_error[joint - 1] = 0;
             restoreNormalMotion(joint);
             if (joint == 5) { steppers[5]->setCurrentPosition(0); queued_steps[5] = 0; tick_error[5] = 0; restoreNormalMotion(6);}
+            if (ok) Power::setHomed((uint8_t)((1u << (joint - 1)) | (joint == 5 ? (1u << 5) : 0)));
         }
+        if (ok) Odometer::onHomed();
+        Odometer::resyncPositions();
+        handleLostDrivers();                         // power may have dropped mid-sequence
         while (Serial.available()) Serial.read();   // discard anything queued during the blocking homing above
+        // Bumped even on failure so the host stops waiting; homed_mask says how it went.
         tx_packet.homing_sequence++;
     }
 
@@ -198,9 +245,13 @@ void onPacket(const uint8_t* buffer, size_t size) {
     // DURATION is derived from the commanded VELOCITY, so the step RATE is
     // constant within the command -- this avoids the fixed-1ms-frame
     // quantization that produces the harsh 1/2-step-per-frame speed noise.
+    const uint8_t ready_mask = Power::ready();
     for (int i = 0; i < 6; i++) {
-        if (!(requested_mask & (1u << i))) {
+        // Disabled, or driver unpowered / not yet reconfigured: hold the queue
+        // at the counter so nothing is stepped into a driver that can't act on it.
+        if (!(requested_mask & (1u << i)) || !(ready_mask & (1u << i))) {
             queued_steps[i] = steppers[i]->getCurrentPosition();
+            tick_error[i] = 0;
             continue;
         }
 
@@ -279,6 +330,9 @@ void onPacket(const uint8_t* buffer, size_t size) {
     }
     tx_packet.gripper_pos = Gripper::applied;
     tx_packet.underruns = movetimed_underruns;
+    tx_packet.driver_ok_mask = Power::ready();
+    tx_packet.homed_mask = Power::homed();
+    Odometer::fillPacket(tx_packet);
     uint8_t payload[sizeof(EspToPiPacket) + 2];
     memcpy(payload, &tx_packet, sizeof(EspToPiPacket));
     uint16_t tcrc = crc16_ccitt(payload, sizeof(EspToPiPacket));
@@ -347,9 +401,11 @@ void loop() {
 
     // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
     packetSerial.update();
+    handleLostDrivers();   // also when the host isn't streaming
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
+        Odometer::update(current_time);
         // printLimitSwitchStates();
     }
         

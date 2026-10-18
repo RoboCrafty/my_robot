@@ -3,12 +3,14 @@ import { motion } from 'motion/react';
 import { toast } from 'sonner';
 import { NJ, cmd, resetSettings, saveSettings, send, setPref, setS, useStore } from '../store.js';
 import { TCP_VARIANTS } from '../hud/TargetCard.jsx';
-import { Button, Num, Section, Seg } from '../hud/ui.jsx';
+import { Badge, Button, Num, Section, Seg } from '../hud/ui.jsx';
 
 export function SetupPane() {
     const prefs = useStore((s) => s.prefs);
     return (
         <>
+            <Robot />
+
             <Section title="Appearance">
                 <div className="kv">
                     <span>Theme</span>
@@ -58,6 +60,48 @@ export function SetupPane() {
                 </div>
             </Section>
         </>
+    );
+}
+
+const hm = (s) => `${Math.floor(s / 3600)} h ${String(Math.floor(s / 60) % 60).padStart(2, '0')} m`;
+
+// Live driver power / homing per joint, plus the lifetime odometer the ESP32
+// keeps in its flash (so it follows the robot, not this computer).
+function Robot() {
+    const power = useStore((s) => s.st.power);
+    const homed = useStore((s) => s.st.homed);
+    const block = useStore((s) => s.st.block);
+    const sim = useStore((s) => s.st.sim);
+    const o = useStore((s) => s.st.odo);
+    const powerOff = block.startsWith('motor power');
+    const badge = powerOff ? <Badge tone="bad">power off</Badge>
+        : block ? <Badge tone="warn">not homed</Badge>
+        : <Badge tone="good">ready</Badge>;
+    return (
+        <Section title="Robot" aside={badge}>
+            <div className="motors">
+                {power.map((on, j) => {
+                    const state = !on ? 'bad' : homed[j] ? 'on' : 'warn';
+                    const tip = !on ? 'driver not answering — no motor power' : homed[j] ? 'powered and homed' : 'powered, needs homing';
+                    return <span key={j} className={`motor ${state}`} title={tip}><span className="motor-led" />J{j + 1}</span>;
+                })}
+            </div>
+            {o ? (
+                <div className="kv">
+                    <span>Power-on</span><span className="mono">{hm(o.power_s)}</span>
+                    <span>Motors energized</span><span className="mono">{hm(o.servo_s)}</span>
+                    <span>Moving</span><span className="mono">{hm(o.motion_s)}</span>
+                    <span>Power cycles</span><span className="mono">{o.power_cycles}</span>
+                    <span>Homings</span><span className="mono">{o.homings}</span>
+                    <span>Driver faults</span><span className="mono">{o.faults}</span>
+                    <span>Travel</span>
+                    <span className="mono small">{o.travel_deg.map((d, j) => `J${j + 1} ${(d / 360).toFixed(1)}`).join('  ')} rev</span>
+                </div>
+            ) : (
+                <p className="muted small">{sim ? 'Lifetime counters live on the ESP32; not available in the simulator.'
+                    : 'Waiting for the ESP32 odometer…'}</p>
+            )}
+        </Section>
     );
 }
 

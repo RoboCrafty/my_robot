@@ -116,8 +116,22 @@ namespace Constants {
     extern TMC2209Stepper J4_driver;
     extern TMC2209Stepper J5_driver;
     extern TMC2209Stepper J6_driver;
+    extern TMC2209Stepper* const DRIVERS[6];   // J1..J6
 
     // ================= FUNCTIONS =================
-    void initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool start_J4, bool start_J5, bool start_J6);
-    void turnDriverOff(uint motorNo);
-    void turnDriverOn(uint motorNo);
+    // Serial1/Serial2 are shared by the loop task (enable/disable) and the
+    // power monitor task (polling, re-init), so every TMC UART access after
+    // setup must hold a TmcLock. tmcLockInit() must run before the first lock.
+    void tmcLockInit();
+    struct TmcLock {
+        TmcLock();
+        ~TmcLock();
+        TmcLock(const TmcLock&) = delete;
+        TmcLock& operator=(const TmcLock&) = delete;
+    };
+
+    // Returns a bitmask of the drivers that answered (bit 0 = J1).
+    uint8_t initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool start_J4, bool start_J5, bool start_J6);
+    void configureDriver(uint8_t idx, bool energize);   // idx 0..5; caller holds TmcLock
+    void turnDriverOff(uint motorNo);                   // caller holds TmcLock
+    void turnDriverOn(uint motorNo);                    // caller holds TmcLock

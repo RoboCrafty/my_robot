@@ -274,9 +274,15 @@ class ProgramRunner:
             angles = wp_angles(node["wp"]) if node.get("wp") else node.get("angles")
             if not angles or len(angles) != NJ:
                 raise ValueError(f"move: unknown waypoint {node.get('wp')!r}")
+            # The controller refuses motion without motor power or homing; a
+            # refused move would otherwise read as an instantly finished one.
+            if latest_state.get("block"):
+                raise ValueError(f"move refused: {latest_state['block']}")
             joints = " ".join(f"{float(x):.3f}" for x in angles)
             send_cmd(f"movel q {joints}" if node.get("motion") == "l" else joints)
             await wait_for_move()
+            if latest_state.get("block"):
+                raise ValueError(f"move interrupted: {latest_state['block']}")
             if node.get("dwell"):
                 await asyncio.sleep(float(node["dwell"]))
 

@@ -42,6 +42,8 @@ export const useStore = create(() => ({
         pos: zeros(NJ), tgt: zeros(NJ), enabled: new Array(NJ).fill(1), speed: 100,
         sim: null, canSimOff: true, grip: 0, gripAck: null,
         vmax: zeros(NJ), amax: zeros(NJ), jmax: zeros(NJ), frame: 'base',
+        // Motor power / homing from the ESP32; `block` = why motion is refused ('' = ok).
+        power: new Array(NJ).fill(1), homed: new Array(NJ).fill(1), block: '', odo: null,
     },
     tcp: zeros(6),
     sigma: 1,
@@ -75,6 +77,7 @@ export function setPref(k, v) {
 let ws = null;
 let lastHud = 0;
 let lastSigmaWarn = 0;
+let lastBlock = null;
 let configLoaded = false;
 
 export function connect() {
@@ -135,15 +138,64 @@ function onState(m) {
             gripAck: typeof m.grip_ack === 'number' ? m.grip_ack : null,
             vmax: m.vmax ?? p.vmax, amax: m.amax ?? p.amax, jmax: m.jmax ?? p.jmax,
             frame: m.frame ?? p.frame,
+            power: Array.isArray(m.power) ? m.power : p.power,
+            homed: Array.isArray(m.homed) ? m.homed : p.homed,
+            block: typeof m.block === 'string' ? m.block : p.block,
+            odo: m.odo !== undefined ? m.odo : p.odo,
         };
     }
-    if (live.sigma < 0.02 && Date.now() - lastSigmaWarn > 5000) {
+    if (typeof m.block === 'string') onBlock(m.block, !!m.busy);
+    // While motion is blocked a singularity nag is noise, and it would stack on
+    // top of the power/rehome alert and hide its Rehome button.
+    if (live.sigma < 0.02 && !lastBlock && Date.now() - lastSigmaWarn > 5000) {
         lastSigmaWarn = Date.now();
         toast.warning(`Near singularity (σmin ${live.sigma.toFixed(4)})`, {
-            description: 'Cartesian motion may be blocked',
+            id: 'sigma', description: 'Cartesian motion may be blocked',
         });
     }
     if (Object.keys(patch).length) useStore.setState(patch);
+}
+
+// Motion stays refused until motor power is back and the arm is re-homed, so
+// this alert stays up (one toast, updated in place) until the controller clears it.
+let homingSince = 0;   // a rehome started from the alert is in flight
+function onBlock(block, busy) {
+    // Rehome finished but motion is still blocked (e.g. power dropped again): re-raise.
+    if (homingSince && !busy && Date.now() - homingSince > 1500) {
+        homingSince = 0;
+        if (block) lastBlock = null;
+    }
+    if (block === lastBlock) return;
+    const was = lastBlock;
+    lastBlock = block;
+    if (!block) {
+        toast.dismiss('power');
+        if (was) toast.success('Motor power on and homed', { id: 'power-ok' });
+        return;
+    }
+    toast.dismiss('sigma');
+    // Updating a toast by id merges options, so a stale Rehome action must be cleared explicitly.
+    if (block.startsWith('motor power off')) {
+        toast.error('Motor power off', {
+            id: 'power', duration: Infinity, action: undefined,
+            description: 'Drivers are not answering. Plug in the motor supply, then rehome.',
+        });
+    } else {
+        toast.warning('Rehome required', {
+            id: 'power', duration: Infinity,
+            description: `Position is unknown after a power cycle: ${block.replace(/ -- .*/, '')}.`,
+            action: {
+                label: 'Rehome',
+                onClick: (e) => {
+                    e.preventDefault();   // keep the alert until the controller clears it
+                    if (!confirm('Rehome all joints using the limit switches?')) return;
+                    cmd('rehome');
+                    homingSince = Date.now();
+                    toast.loading('Homing…', { id: 'power', duration: Infinity, action: undefined, description: 'Running the limit-switch sequence.' });
+                },
+            },
+        });
+    }
 }
 
 // The server re-broadcasts the whole config on every save. Only the first one

@@ -21,10 +21,16 @@
 #include <cctype>
 
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <csignal>
 #include <cstdio>
+#include <deque>
+#include <chrono>
 
 #include "protocol.h"   // EspToPiPacket / PiToEspPacket + COBS/CRC framing
 #include "kinematics.hpp" // Pinocchio FK/IK (radians, metres)
@@ -93,6 +99,15 @@ struct SimEsp {
     uint8_t homing_sequence = 0;
     uint8_t gripper_pos = 0;
     int     rehome_ticks = -1;
+    uint8_t rehome_bits = 0x3f;
+    bool    power = true;       // 'simpower off' mimics unplugging the motor supply
+    uint8_t homed = 0x3f;
+
+    void setPower(bool on) {
+        if (on == power) return;
+        power = on;
+        homed = 0;              // either edge: the real drivers reset, position is suspect
+    }
 
     void step(const PiToEspPacket& tx, EspToPiPacket& rx) {
         // Report first: real hardware always answers with the *previous* tick's
@@ -101,17 +116,26 @@ struct SimEsp {
         memcpy(rx.actual_position, pos, sizeof(pos));
         rx.homing_sequence = homing_sequence;
         rx.gripper_pos = gripper_pos;
+        rx.driver_ok_mask = power ? 0x3f : 0;
+        rx.homed_mask = homed;
+        rx.stat_id = 0xFF;      // no odometer in the simulator
         gripper_pos = tx.gripper_pos;   // the slave has no travel time we model
 
-        if (tx.motor_enable_mask & FLAG_REHOME) rehome_ticks = 500; // ~1 s of "homing"
+        if (tx.motor_enable_mask & FLAG_REHOME) {
+            int j = (tx.flags & REHOME_JOINT_MASK) >> REHOME_JOINT_SHIFT;
+            rehome_bits = (j == 0) ? 0x3f : (uint8_t)((1u << (j - 1)) | (j == 5 ? (1u << 5) : 0));
+            if (power) rehome_ticks = 500;          // ~1 s of "homing"
+            else homing_sequence++;                 // fails at once, like the firmware
+        }
         if (rehome_ticks > 0) {
             if (--rehome_ticks == 0) {
-                for (int i = 0; i < 6; i++) pos[i] = 0.0f;
+                for (int i = 0; i < 6; i++) if (rehome_bits & (1u << i)) pos[i] = 0.0f;
+                if (power) homed |= rehome_bits;
                 homing_sequence++;
             }
             return;
         }
-        if (tx.flags & FLAG_HOLD) return;
+        if (!power || (tx.flags & FLAG_HOLD)) return;
         for (int i = 0; i < 6; i++)
             if (tx.motor_enable_mask & (1u << i)) pos[i] = tx.pos_cmd[i];
     }
@@ -168,6 +192,184 @@ static int    g_rehome_joint = 0;          // 0 = all six, 1..6 = one joint; gua
 static bool   g_rehome_hold = false;       // owned by the control loop
 static uint8_t g_rehome_completion = 0;    // owned by the control loop
 static bool   g_sync_request = false;     // guarded by g_mtx
+
+// Motor power and homing as reported by the ESP32 (or the simulator), bit i = Ji.
+// A joint without power or homing blocks every motion command until a rehome:
+// after a power cycle the drivers restart from their defaults and the arm may
+// have dropped, so the step counters no longer describe where it is.
+static std::atomic<uint8_t>  g_driver_ok{0x3f};
+static std::atomic<uint8_t>  g_homed{0x3f};
+static std::atomic<bool>     g_sim_power{true};    // 'simpower on|off', applied to SimEsp by the loop
+
+// Lifetime odometer, kept in the ESP32's NVS and streamed one counter per reply.
+static std::array<std::atomic<uint32_t>, STAT_COUNT> g_odo{};
+static std::atomic<uint32_t> g_odo_seen{0};        // bit per STAT_* received since start
+static constexpr uint32_t ODO_ALL = (1u << STAT_COUNT) - 1;
+static bool odoComplete() { return (g_odo_seen.load() & ODO_ALL) == ODO_ALL; }
+
+static std::string jointList(uint8_t mask) {
+    std::string s;
+    for (int i = 0; i < 6; i++)
+        if (mask & (1u << i)) { if (!s.empty()) s += ' '; s += "J" + std::to_string(i + 1); }
+    return s;
+}
+
+// Why motion commands are currently refused, or "" if they are allowed.
+static std::string motionBlockReason() {
+    uint8_t ok = g_driver_ok.load(), homed = g_homed.load();
+    if (ok != 0x3f)    return "motor power off (" + jointList(~ok & 0x3f) + ")";
+    if (homed != 0x3f) return "not homed (" + jointList(~homed & 0x3f) + ") -- rehome first";
+    return "";
+}
+
+static std::string fmtHours(uint32_t s) {
+    char b[48];
+    snprintf(b, sizeof(b), "%u h %02u m", s / 3600, (s / 60) % 60);
+    return b;
+}
+
+static std::string odoJson() {
+    std::ostringstream os;
+    os << "{\"power_s\":" << g_odo[STAT_POWER_S] << ",\"servo_s\":" << g_odo[STAT_SERVO_S]
+       << ",\"motion_s\":" << g_odo[STAT_MOTION_S] << ",\"power_cycles\":" << g_odo[STAT_POWER_CYCLES]
+       << ",\"homings\":" << g_odo[STAT_HOMINGS] << ",\"boots\":" << g_odo[STAT_BOOTS]
+       << ",\"faults\":" << g_odo[STAT_DRIVER_FAULTS] << ",\"travel_deg\":[";
+    for (int i = 0; i < 6; i++) os << (i ? "," : "") << g_odo[STAT_TRAVEL_J1 + i];
+    os << "]}";
+    return os.str();
+}
+
+// --- Records on the Pi: events.log (append-only) + odometer.json (mirror) ---
+// The ESP32's NVS is the master copy of the odometer; the mirror is there for
+// when that board gets replaced or erased. Lives in $PAROL_DATA_DIR (default
+// ~/.parol), outside the repo. All file I/O happens on its own thread, because
+// an SD-card fsync can stall for tens of ms -- far longer than a 2 ms tick.
+static std::mutex               g_rec_mtx;
+static std::condition_variable  g_rec_cv;
+static std::deque<std::string>  g_rec_events;   // guarded by g_rec_mtx
+static bool                     g_rec_stop = false; // guarded by g_rec_mtx
+
+static std::string localTimestamp() {
+    time_t t = time(nullptr); struct tm tm; localtime_r(&t, &tm);
+    char b[40]; strftime(b, sizeof(b), "%Y-%m-%d %H:%M:%S%z", &tm);
+    return b;
+}
+
+static void logEvent(const std::string& what) {
+    { std::lock_guard<std::mutex> lk(g_rec_mtx); g_rec_events.push_back(localTimestamp() + "  " + what); }
+    g_rec_cv.notify_one();
+}
+
+static std::string dataDir() {
+    const char* d = getenv("PAROL_DATA_DIR");
+    if (d && *d) return d;
+    const char* h = getenv("HOME");
+    return std::string(h ? h : ".") + "/.parol";
+}
+
+// Write-to-temp + fsync + rename: a power cut leaves either the old or the new
+// file, never a torn one.
+static bool writeFileAtomic(const std::string& path, const std::string& data) {
+    std::string tmp = path + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    bool ok = write(fd, data.data(), data.size()) == (ssize_t)data.size() && fsync(fd) == 0;
+    close(fd);
+    return ok && rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+static void recorderThread() {
+    const std::string dir = dataDir();
+    mkdir(dir.c_str(), 0755);
+    const std::string events_path = dir + "/events.log", odo_path = dir + "/odometer.json";
+    std::string last_odo;
+    auto last_mirror = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    for (;;) {
+        std::deque<std::string> ev; bool stop;
+        {
+            std::unique_lock<std::mutex> lk(g_rec_mtx);
+            g_rec_cv.wait_for(lk, std::chrono::seconds(1), [] { return !g_rec_events.empty() || g_rec_stop; });
+            ev.swap(g_rec_events);
+            stop = g_rec_stop;
+        }
+        if (!ev.empty()) {
+            if (FILE* f = fopen(events_path.c_str(), "a")) {
+                for (auto& e : ev) fprintf(f, "%s\n", e.c_str());
+                fflush(f); fsync(fileno(f)); fclose(f);
+            }
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (odoComplete() && (stop || now - last_mirror >= std::chrono::seconds(60))) {
+            last_mirror = now;
+            std::string j = odoJson();
+            if (j != last_odo &&
+                writeFileAtomic(odo_path, "{\"updated\":\"" + localTimestamp() + "\",\"odometer\":" + j + "}\n"))
+                last_odo = j;
+        }
+        if (stop) break;
+    }
+}
+
+// --- Live status rows pinned to the bottom of the terminal ('mon' / 'stats') ---
+// A scroll region (DECSTBM) keeps the REPL and log lines scrolling above them,
+// so the readouts redraw in place instead of flooding the scrollback. Every
+// redraw is one write() wrapped in save/restore-cursor, so it never disturbs
+// readline's cursor or a half-typed command. Owned by the control loop thread.
+static int g_status_rows = 0;        // rows currently reserved
+static int g_status_term_rows = 0;   // terminal height when they were reserved
+
+static void ttyWrite(const std::string& s) { ssize_t r = write(STDOUT_FILENO, s.data(), s.size()); (void)r; }
+
+static std::string statusReleaseSeq() {
+    std::string s = "\x1b" "7" "\x1b[r";
+    for (int r = g_status_term_rows - g_status_rows + 1; r <= g_status_term_rows; r++)
+        s += "\x1b[" + std::to_string(r) + ";1H\x1b[2K";
+    s += "\x1b" "8";
+    g_status_rows = 0;
+    return s;
+}
+
+static void statusRelease() {
+    if (g_status_rows) ttyWrite(statusReleaseSeq());
+}
+
+static void statusDraw(const std::vector<std::string>& lines) {
+    if (!isatty(STDOUT_FILENO)) {           // piped/logged: plain lines are more useful
+        std::string s; for (auto& l : lines) s += l + "\n";
+        ttyWrite(s); return;
+    }
+    struct winsize ws{};
+    int rows = 24, cols = 80;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) { rows = ws.ws_row; cols = ws.ws_col; }
+    const int need = (int)lines.size();
+    if (need == 0 || rows - need < 3) { statusRelease(); return; }
+
+    std::string s;
+    if (need != g_status_rows || rows != g_status_term_rows) {
+        if (g_status_rows) s += statusReleaseSeq();
+        // Scroll existing output up so the cursor ends above the reserved rows.
+        // IND (ESC D) scrolls at the bottom margin without changing the column.
+        for (int k = 0; k < need; k++) s += "\x1b" "D";
+        s += "\x1b[" + std::to_string(need) + "A";
+        s += "\x1b" "7" "\x1b[1;" + std::to_string(rows - need) + "r" "\x1b" "8";
+        g_status_rows = need; g_status_term_rows = rows;
+    }
+    s += "\x1b" "7";
+    for (int k = 0; k < need; k++) {
+        s += "\x1b[" + std::to_string(rows - need + 1 + k) + ";1H\x1b[2K";
+        s += lines[k].substr(0, (size_t)std::max(1, cols - 1));
+    }
+    s += "\x1b" "8";
+    ttyWrite(s);
+}
+
+// Ctrl-C / kill must not leave the shell stuck inside a scroll region.
+static void resetScrollRegionAndDie(int sig) {
+    static const char seq[] = "\x1b" "7" "\x1b[r" "\x1b" "8";
+    ssize_t r = write(STDOUT_FILENO, seq, sizeof(seq) - 1); (void)r;
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 // Parallel gripper servo angle, relayed to a second ESP32 over ESP-NOW. The
 // controller only carries the raw 0..GRIPPER_POS_MAX value; named grip presets
@@ -314,8 +516,10 @@ static const char* HELP_TEXT =
     "  acc  <j|all> <v>    set max acceleration (deg/s^2)\n"
     "  jerk <j|all> <v>    set max jerk (deg/s^3)\n"
     "  limits              show current motion limits\n"
-    "  mon                 toggle live position monitor\n"
-    "  stats               toggle loop and serial statistics\n"
+    "  mon                 toggle live position monitor (pinned to the bottom rows)\n"
+    "  stats               toggle loop / serial / power statistics (pinned row)\n"
+    "  info                motor power, homing and lifetime odometer (power-on hours...)\n"
+    "  simpower <on|off>   simulator only: mimic plugging/unplugging motor power\n"
     "  help                show this help\n"
     "  q / quit            exit\n";
 
@@ -344,6 +548,19 @@ static std::string handleCommand(const std::string& line) {
         bool is_motion = (int)tok.size() == DOFs
                       || (tok.size() == 2 && std::isdigit((unsigned char)tok[0][0]));
         for (const char* v : kMotionVerbs) is_motion = is_motion || tok[0] == v;
+
+        // Without motor power, or after a power cycle until the arm is re-homed,
+        // the step counters don't describe the arm: refuse rather than drive it
+        // to a position computed from a stale zero. Stopping a jog stays allowed.
+        bool starts_jog = (tok[0] == "jogvel" || tok[0] == "cartjogvel")
+                       && tok.size() == 3 && std::atof(tok[2].c_str()) != 0.0;
+        if (tok[0] == "rehome") {
+            uint8_t ok = g_driver_ok.load();
+            if (ok != 0x3f) return "refused: motor power off (" + jointList(~ok & 0x3f) + ") -- cannot home";
+        } else if ((is_motion && tok[0] != "stop") || starts_jog) {
+            std::string why = motionBlockReason();
+            if (!why.empty()) return "refused: " + why;
+        }
         if (is_motion) g_move_seq.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -351,6 +568,36 @@ static std::string handleCommand(const std::string& line) {
     if (tok[0] == "help" || tok[0] == "h") return HELP_TEXT;
     if (tok[0] == "mon") { g_monitor = !g_monitor.load(); return g_monitor ? "monitor ON" : "monitor OFF"; }
     if (tok[0] == "stats") { g_stats = !g_stats.load(); return g_stats ? "stats ON" : "stats OFF"; }
+    if (tok[0] == "simpower") {
+        if (tok.size() != 2 || (tok[1] != "on" && tok[1] != "off")) return "usage: simpower <on|off>";
+        if (!g_sim.load()) return "simpower only works in the simulator ('sim on')";
+        g_sim_power = (tok[1] == "on");
+        return g_sim_power ? "sim motor power ON (rehome required)" : "sim motor power OFF";
+    }
+    if (tok[0] == "info") {
+        uint8_t ok = g_driver_ok.load(), homed = g_homed.load();
+        std::ostringstream os;
+        os << "  motor power    " << (ok == 0x3f ? "ON" : ok == 0 ? "OFF" : "PARTIAL")
+           << (ok == 0x3f ? "" : "  (not answering: " + jointList(~ok & 0x3f) + ")") << "\n"
+           << "  homed          " << (homed == 0x3f ? "yes" : "NO  (" + jointList(~homed & 0x3f) + ")") << "\n";
+        std::string why = motionBlockReason();
+        if (!why.empty()) os << "  motion         BLOCKED: " << why << "\n";
+        if (g_sim.load()) {
+            os << "  odometer       (simulator -- the real counters live on the ESP32)\n";
+        } else if (!odoComplete()) {
+            os << "  odometer       (waiting for the ESP32 -- older firmware?)\n";
+        } else {
+            os << "  power-on time  " << fmtHours(g_odo[STAT_POWER_S]) << "   (motor supply present)\n"
+               << "  servo-on time  " << fmtHours(g_odo[STAT_SERVO_S]) << "   (motors energized)\n"
+               << "  motion time    " << fmtHours(g_odo[STAT_MOTION_S]) << "   (any joint moving)\n"
+               << "  power cycles   " << g_odo[STAT_POWER_CYCLES] << "    homings " << g_odo[STAT_HOMINGS]
+               << "    ESP32 boots " << g_odo[STAT_BOOTS] << "    driver faults " << g_odo[STAT_DRIVER_FAULTS] << "\n"
+               << "  travel (deg)  ";
+            for (int i = 0; i < 6; i++) os << " J" << (i + 1) << " " << g_odo[STAT_TRAVEL_J1 + i];
+            os << "\n  records        " << dataDir() << "/{events.log,odometer.json}\n";
+        }
+        return os.str();
+    }
     if (tok[0] == "stop") { std::lock_guard<std::mutex> lk(g_mtx); g_stop_request = true; clearJogLocked(); return "stopping"; }
     if (tok[0] == "sync") { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; return "syncing"; }
     if (tok[0] == "radio") {
@@ -860,6 +1107,27 @@ int main(int argc, char** argv) {
 
     // Seed the shared targets with the current position, then start REPL + UDP.
     for (int i = 0; i < DOFs; i++) g_target[i] = input.target_position[i];
+
+    // What the arm looks like right now: the ESP32 skips its boot homing when
+    // motor power is off, and the planner must not trust the counters until homed.
+    g_driver_ok = rx_packet.driver_ok_mask & 0x3f;
+    g_homed     = rx_packet.homed_mask & 0x3f;
+    uint8_t prev_driver_ok = g_driver_ok;
+    if (g_driver_ok != 0x3f)
+        std::cout << "[power] motor power OFF (" << jointList(~g_driver_ok & 0x3f)
+                  << " not answering) -- plug it in, then 'rehome'\n";
+    else if (g_homed != 0x3f)
+        std::cout << "[power] not homed (" << jointList(~g_homed & 0x3f) << ") -- 'rehome' before moving\n";
+
+    if (isatty(STDOUT_FILENO)) {
+        signal(SIGINT,  resetScrollRegionAndDie);
+        signal(SIGTERM, resetScrollRegionAndDie);
+        signal(SIGHUP,  resetScrollRegionAndDie);
+    }
+    std::thread rec(recorderThread);
+    logEvent(std::string("controller started (") + (g_sim ? "simulator" : port) + ")"
+             + (g_driver_ok != 0x3f ? ", motor power off" : g_homed != 0x3f ? ", not homed" : ""));
+
     std::thread repl(inputThread);
     std::thread udp(udpThread, udp_port);
     std::thread fg(foxgloveThread, (uint16_t)fg_port);
@@ -876,6 +1144,9 @@ int main(int argc, char** argv) {
     long   loop_count = 0, tx_count = 0, rx_count = 0;
     uint32_t underruns_prev = 0;
     double stats_window_us = 0;
+    std::string stats_line;            // last [stats] row, redrawn with the monitor rows
+    bool odo_announced = false;        // first complete odometer set has been logged
+    uint32_t faults_prev = 0;
 
     // Cartesian state, owned exclusively by this loop.
     Mode mode = Mode::Joint;
@@ -913,6 +1184,69 @@ int main(int argc, char** argv) {
     }
     in_jog.synchronization = Synchronization::None; // each twist axis (already orthogonal) ramps independently
 
+    // Per-reply bookkeeping, shared by hardware and the simulator: rehome
+    // completion, motor-power transitions and the odometer stream. Only real
+    // hardware writes to the event log.
+    auto onReply = [&](bool hw) {
+        if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
+            g_rehome_hold = false;
+            if (hw) serial.flushReceiver();   // drop anything buffered during the blocking homing
+            // Adopt what the ESP actually reports rather than assuming a
+            // clean zero: if any homing move was cut short, believing zero
+            // would leave every later target offset by that error.
+            { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; }
+            uint8_t missing = rehome_mask & ~rx_packet.homed_mask & 0x3f;
+            if (!missing) {
+                std::cout << "Rehome complete\n";
+                if (hw) logEvent("rehome ok (" + jointList(rehome_mask) + ")");
+            } else {
+                std::cout << "Rehome FAILED: " << jointList(missing) << " not homed (motor power?)\n";
+                if (hw) logEvent("rehome failed (" + jointList(missing) + ")");
+            }
+        }
+
+        const uint8_t ok = rx_packet.driver_ok_mask & 0x3f;
+        g_driver_ok = ok;
+        g_homed     = rx_packet.homed_mask & 0x3f;
+        if (ok != prev_driver_ok) {
+            const uint8_t lost = prev_driver_ok & ~ok, back = ok & ~prev_driver_ok;
+            prev_driver_ok = ok;
+            if (lost) {
+                { std::lock_guard<std::mutex> lk(g_mtx); clearJogLocked(); }
+                std::cout << "[power] motor power LOST (" << jointList(lost)
+                          << ") -- motion stopped; rehome once it is back\n";
+                if (hw) logEvent("motor power lost (" + jointList(lost) + ")"
+                                 + (odoComplete() ? ", power-on total " + fmtHours(g_odo[STAT_POWER_S]) : ""));
+            }
+            if (back) {
+                std::cout << "[power] motor power back (" << jointList(back) << "), drivers reconfigured"
+                          << (ok == 0x3f ? " -- 'rehome' before moving\n" : "\n");
+                if (hw) logEvent("motor power restored (" + jointList(back) + ")");
+            }
+        }
+
+        if (!hw || rx_packet.stat_id >= STAT_COUNT) return;
+        g_odo[rx_packet.stat_id] = rx_packet.stat_value;
+        g_odo_seen.fetch_or(1u << rx_packet.stat_id);
+        if (!odoComplete()) return;
+        const uint32_t faults = g_odo[STAT_DRIVER_FAULTS];
+        if (!odo_announced) {
+            odo_announced = true;
+            faults_prev = faults;
+            logEvent("odometer: power-on " + fmtHours(g_odo[STAT_POWER_S])
+                     + ", servo-on " + fmtHours(g_odo[STAT_SERVO_S])
+                     + ", motion " + fmtHours(g_odo[STAT_MOTION_S])
+                     + ", power cycles " + std::to_string(g_odo[STAT_POWER_CYCLES])
+                     + ", homings " + std::to_string(g_odo[STAT_HOMINGS])
+                     + ", ESP32 boots " + std::to_string(g_odo[STAT_BOOTS])
+                     + ", driver faults " + std::to_string(faults));
+        } else if (faults != faults_prev) {
+            faults_prev = faults;
+            std::cout << "[power] TMC driver fault (over-temperature or short) -- " << faults << " total\n";
+            logEvent("driver fault, total " + std::to_string(faults));
+        }
+    };
+
     // Enter Main loop 
     while (g_running.load()) {
 
@@ -923,14 +1257,21 @@ int main(int argc, char** argv) {
         loop_count++; stats_window_us += dt_us;
         if (stats_window_us >= 1e6) {
             if (g_stats.load()) {
-                std::fprintf(stderr, "[stats] loop %.0f Hz  serial writes %ld/s  ESP replies %ld/s"
-                    "  step-queue underruns %u (+%u/s)\n",
+                char sl[256];
+                uint8_t ok = g_driver_ok.load(), hm = g_homed.load();
+                snprintf(sl, sizeof(sl), "[stats] %.0f Hz  tx %ld/s  rx %ld/s  underruns %u (+%u/s)  power %s  homed %s",
                     loop_count / (stats_window_us / 1e6), tx_count, rx_count,
-                    rx_packet.underruns, rx_packet.underruns - underruns_prev);
+                    rx_packet.underruns, rx_packet.underruns - underruns_prev,
+                    ok == 0x3f ? "ok" : ("OFF " + jointList(~ok & 0x3f)).c_str(),
+                    hm == 0x3f ? "ok" : ("NO " + jointList(~hm & 0x3f)).c_str());
+                stats_line = sl;
+                if (!g_monitor.load()) statusDraw({stats_line});
             }
             underruns_prev = rx_packet.underruns;
             loop_count = 0; tx_count = 0; rx_count = 0; stats_window_us = 0;
         }
+        if (!g_stats.load()) stats_line.clear();
+        if (!g_stats.load() && !g_monitor.load() && g_status_rows) statusRelease();
 
         // Apply any freshly entered target(s)/limits/stop from the REPL thread.
         {
@@ -961,6 +1302,16 @@ int main(int argc, char** argv) {
                     g_target[i]              = input.current_position[i];
                 }
                 g_stop_request = false;
+            }
+            // Motor power missing or arm un-homed: pin the planner to the feedback
+            // every tick, so nothing is commanded now and nothing jumps once power
+            // and homing return. Drops anything that slipped past the command-side
+            // check. A rehome in flight owns the planner state, so leave it alone.
+            if ((g_driver_ok.load() != 0x3f || g_homed.load() != 0x3f) && !g_rehome_hold) {
+                g_have_new = g_move_request = g_lin_request = false;
+                clearJogLocked();
+                input.control_interface = ControlInterface::Position;
+                g_sync_request = true;
             }
             if (g_sync_request) {
                 // Adopt motor feedback as the planner state. The ESP re-references
@@ -1445,16 +1796,10 @@ int main(int argc, char** argv) {
         // 2. Send Velocity Command (COBS-framed + CRC16)
         const bool simulating = g_sim.load();
         if (simulating) {
+            sim.setPower(g_sim_power.load());
             sim.step(tx_packet, rx_packet);
             tx_count++; rx_count++;
-            if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
-                g_rehome_hold = false;
-                // Adopt what the ESP actually reports rather than assuming a
-                // clean zero: if any homing move was cut short, believing zero
-                // would leave every later target offset by that error.
-                { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; }
-                std::cout << "Rehome complete\n";
-            }
+            onReply(false);
         } else {
             // The ESP blocks inside its packet handler for the whole homing run
             // (tens of seconds). Streaming at 500 Hz into that would queue tens
@@ -1472,12 +1817,7 @@ int main(int argc, char** argv) {
             // 3. Wait for a valid framed reply (bounded to the ~2ms cycle budget)
             if (readFramedPacket(serial, rx_reader, rx_packet, 1)) {
                 rx_count++;
-                if (g_rehome_hold && rx_packet.homing_sequence == g_rehome_completion) {
-                    g_rehome_hold = false;
-                    serial.flushReceiver();   // drop anything buffered during the blocking homing
-                    { std::lock_guard<std::mutex> lk(g_mtx); g_sync_request = true; }
-                    std::cout << "Rehome complete\n";
-                }
+                onReply(true);
             }
         }
 
@@ -1489,23 +1829,25 @@ int main(int argc, char** argv) {
                           rx_packet.actual_position);
         }
 
-        // 4. Optional live telemetry at ~5 Hz. Toggle with 'mon'.
+        // 4. Optional live telemetry at ~5 Hz, redrawn in place. Toggle with 'mon'.
         static int telem = 0;
         if (g_monitor.load() && (++telem % 100 == 0)) {
             const float* a = rx_packet.actual_position;
             const float* c = tx_packet.pos_cmd;
             const double* tg = input.target_position.data();
-            std::fprintf(stdout,
-                "[mon] act  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
-                "      cmd  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
-                "      tgt  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n"
-                "      err  J1:%7.2f  J2:%7.2f  J3:%7.2f  J4:%7.2f  J5:%7.2f  J6:%7.2f\n",
-                a[0],a[1],a[2],a[3],a[4],a[5],
-                c[0],c[1],c[2],c[3],c[4],c[5],
-                tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
-                a[0]-c[0], a[1]-c[1], a[2]-c[2],
-                a[3]-c[3], a[4]-c[4], a[5]-c[5]);
-            std::fflush(stdout);
+            char l[4][160];
+            snprintf(l[0], sizeof(l[0]), "[mon] act J1:%7.2f J2:%7.2f J3:%7.2f J4:%7.2f J5:%7.2f J6:%7.2f",
+                     a[0], a[1], a[2], a[3], a[4], a[5]);
+            snprintf(l[1], sizeof(l[1]), "      cmd J1:%7.2f J2:%7.2f J3:%7.2f J4:%7.2f J5:%7.2f J6:%7.2f",
+                     c[0], c[1], c[2], c[3], c[4], c[5]);
+            snprintf(l[2], sizeof(l[2]), "      tgt J1:%7.2f J2:%7.2f J3:%7.2f J4:%7.2f J5:%7.2f J6:%7.2f",
+                     tg[0], tg[1], tg[2], tg[3], tg[4], tg[5]);
+            snprintf(l[3], sizeof(l[3]), "      err J1:%7.2f J2:%7.2f J3:%7.2f J4:%7.2f J5:%7.2f J6:%7.2f",
+                     a[0]-c[0], a[1]-c[1], a[2]-c[2], a[3]-c[3], a[4]-c[4], a[5]-c[5]);
+            std::vector<std::string> rows;
+            if (!stats_line.empty()) rows.push_back(stats_line);
+            for (auto& s : l) rows.push_back(s);
+            statusDraw(rows);
         }
 
         // Publish state to the web UI over UDP at ~30 Hz.
@@ -1536,7 +1878,8 @@ int main(int argc, char** argv) {
                 Eigen::Matrix<double, 6, 1> tcp = kin.ForwardKinematics(q_fb);
                 // Refresh the gauge from feedback while idle; the servo path keeps it live.
                 if (mode == Mode::Joint) last_sigma_min = kin.sigmaMin(q_fb);
-                char sb[1024];
+                const uint8_t pw = g_driver_ok.load(), hm = g_homed.load();
+                char sb[2048];
                 int len = snprintf(sb, sizeof(sb),
                     "{\"pos\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                     "\"tgt\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
@@ -1549,7 +1892,9 @@ int main(int argc, char** argv) {
                     "\"vmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"amax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                     "\"jmax\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                    "\"enabled\":[%d,%d,%d,%d,%d,%d]}",
+                    "\"enabled\":[%d,%d,%d,%d,%d,%d],"
+                    "\"power\":[%d,%d,%d,%d,%d,%d],"
+                    "\"homed\":[%d,%d,%d,%d,%d,%d],",
                     rx_packet.actual_position[0], rx_packet.actual_position[1], rx_packet.actual_position[2],
                     rx_packet.actual_position[3], rx_packet.actual_position[4], rx_packet.actual_position[5],
                     tg[0],tg[1],tg[2],tg[3],tg[4],tg[5],
@@ -1566,9 +1911,19 @@ int main(int argc, char** argv) {
                     jm[0],jm[1],jm[2],jm[3],jm[4],jm[5],
                     (enabled_mask & 0x01) != 0, (enabled_mask & 0x02) != 0,
                     (enabled_mask & 0x04) != 0, (enabled_mask & 0x08) != 0,
-                    (enabled_mask & 0x10) != 0, (enabled_mask & 0x20) != 0);
-                if (len > 0)
-                    for (auto& cli : targets) sendto(g_udp_fd, sb, (size_t)len, 0, (sockaddr*)&cli, sizeof(cli));
+                    (enabled_mask & 0x10) != 0, (enabled_mask & 0x20) != 0,
+                    (pw & 0x01) != 0, (pw & 0x02) != 0, (pw & 0x04) != 0,
+                    (pw & 0x08) != 0, (pw & 0x10) != 0, (pw & 0x20) != 0,
+                    (hm & 0x01) != 0, (hm & 0x02) != 0, (hm & 0x04) != 0,
+                    (hm & 0x08) != 0, (hm & 0x10) != 0, (hm & 0x20) != 0);
+                if (len > 0 && len < (int)sizeof(sb)) {
+                    // `block` is why motion is refused ("" = allowed); `odo` is null
+                    // until every ESP32 counter has arrived (and in the simulator).
+                    std::string msg(sb, (size_t)len);
+                    msg += "\"block\":\"" + motionBlockReason() + "\",\"odo\":"
+                         + (!simulating && odoComplete() ? odoJson() : std::string("null")) + "}";
+                    for (auto& cli : targets) sendto(g_udp_fd, msg.data(), msg.size(), 0, (sockaddr*)&cli, sizeof(cli));
+                }
             }
         }
 
@@ -1582,6 +1937,11 @@ int main(int argc, char** argv) {
     }
 
     g_running = false;
+    statusRelease();
+    logEvent("controller stopped");
+    { std::lock_guard<std::mutex> lk(g_rec_mtx); g_rec_stop = true; }
+    g_rec_cv.notify_one();
+    if (rec.joinable())  rec.join();     // flushes the event log + final odometer mirror
     if (udp.joinable())  udp.join();     // exits within the recv timeout
     if (fg.joinable())   fg.join();      // exits within its 200ms condvar wait
     if (repl.joinable()) repl.detach();  // stdin getline can't be unblocked; let it go

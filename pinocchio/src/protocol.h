@@ -22,6 +22,10 @@ struct EspToPiPacket {
     uint8_t homing_sequence;  // Increments after each completed rehome
     uint8_t gripper_pos;      // Last value the ESP-NOW link actually delivered
     uint32_t underruns;       // Cumulative step-queue-empty events (motion roughness)
+    uint8_t driver_ok_mask;   // Bit i: Ji's TMC driver answers on UART and is configured (motor power present)
+    uint8_t homed_mask;       // Bit i: Ji homed since its driver last powered up; cleared by any power loss
+    uint8_t stat_id;          // Which odometer counter stat_value carries (STAT_*); rotates every reply
+    uint32_t stat_value;      // Value of counter stat_id (persisted in the ESP32's NVS flash)
 };
 
 struct PiToEspPacket {
@@ -44,6 +48,20 @@ static const uint8_t REHOME_JOINT_SHIFT = 2;
 static const uint8_t REHOME_JOINT_MASK  = 0x1C;
 static const uint8_t FLAG_REHOME = 0x40;
 static const uint8_t FLAG_SYNC   = 0x80;
+
+// Odometer counters multiplexed through EspToPiPacket::stat_id/stat_value, one
+// per reply, so the whole set refreshes every STAT_COUNT packets (~26 ms).
+enum : uint8_t {
+    STAT_POWER_S = 0,      // seconds with motor power present (any driver answering)
+    STAT_SERVO_S,          // seconds with power present AND at least one motor energized
+    STAT_MOTION_S,         // seconds during which any joint was stepping
+    STAT_POWER_CYCLES,     // motor-power on transitions seen while the ESP32 was running
+    STAT_HOMINGS,          // completed homing runs (all-joint or single-joint)
+    STAT_BOOTS,            // ESP32 boots
+    STAT_DRIVER_FAULTS,    // TMC drv_err events (over-temperature / short shutdown)
+    STAT_TRAVEL_J1,        // whole degrees travelled by J1 (J2..J6 follow consecutively)
+    STAT_COUNT = STAT_TRAVEL_J1 + 6
+};
 
 // ---------------------------------------------------------------------------
 // CRC16-CCITT (poly 0x1021, init 0xFFFF)
