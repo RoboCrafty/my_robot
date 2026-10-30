@@ -175,6 +175,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
 
     memcpy(&rx_packet, buffer, sizeof(PiToEspPacket));
     handleLostDrivers();
+    Odometer::handleOp(rx_packet);
 
     // Records the target only; the ESP-NOW frame goes out from the core-0 task
     // so the radio never delays this reply.
@@ -332,6 +333,8 @@ void onPacket(const uint8_t* buffer, size_t size) {
     tx_packet.underruns = movetimed_underruns;
     tx_packet.driver_ok_mask = Power::ready();
     tx_packet.homed_mask = Power::homed();
+    tx_packet.uart_fail_mask = Power::fail_mask;
+    tx_packet.kept_power_mask = Power::kept_power_mask;
     Odometer::fillPacket(tx_packet);
     uint8_t payload[sizeof(EspToPiPacket) + 2];
     memcpy(payload, &tx_packet, sizeof(EspToPiPacket));

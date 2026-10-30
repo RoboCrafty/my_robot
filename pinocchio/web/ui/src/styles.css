@@ -155,6 +155,8 @@ code { font: 12px var(--mono); }
 .num-grid small { color: var(--faint); font-size: 10px; margin-left: 2px; }
 .num-grid.compact { margin-top: 14px; }
 .num-grid.compact dd { font-size: 12.5px; }
+.odo-head { margin-top: 16px; }
+.odo-travel { margin-top: 8px; }
 .sigma {
     display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
     margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);

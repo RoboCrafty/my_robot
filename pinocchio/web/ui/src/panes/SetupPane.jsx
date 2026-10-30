@@ -87,16 +87,23 @@ function Robot() {
                 })}
             </div>
             {o ? (
-                <div className="kv">
-                    <span>Power-on</span><span className="mono">{hm(o.power_s)}</span>
-                    <span>Motors energized</span><span className="mono">{hm(o.servo_s)}</span>
-                    <span>Moving</span><span className="mono">{hm(o.motion_s)}</span>
-                    <span>Power cycles</span><span className="mono">{o.power_cycles}</span>
-                    <span>Homings</span><span className="mono">{o.homings}</span>
-                    <span>Driver faults</span><span className="mono">{o.faults}</span>
-                    <span>Travel</span>
-                    <span className="mono small">{o.travel_deg.map((d, j) => `J${j + 1} ${(d / 360).toFixed(1)}`).join('  ')} rev</span>
-                </div>
+                <>
+                    <div className="kv">
+                        <span>Power-on</span><span className="mono">{hm(o.power_s)}</span>
+                        <span>Motors energized</span><span className="mono">{hm(o.servo_s)}</span>
+                        <span>Moving</span><span className="mono">{hm(o.motion_s)}</span>
+                        <span>Power cycles</span><span className="mono">{o.power_cycles}</span>
+                        <span>Homings</span><span className="mono">{o.homings}</span>
+                        <span>Driver faults</span><span className="mono">{o.faults}</span>
+                    </div>
+                    {/* Output-shaft turns of each joint (the counters are whole degrees). */}
+                    <div className="eyebrow odo-head">Joint travel · revolutions</div>
+                    <dl className="num-grid compact odo-travel">
+                        {o.travel_deg.map((d, j) => (
+                            <div key={j} title={`${d.toLocaleString()}° total`}><dt>J{j + 1}</dt><dd>{(d / 360).toFixed(1)}</dd></div>
+                        ))}
+                    </dl>
+                </>
             ) : (
                 <p className="muted small">{sim ? 'Lifetime counters live on the ESP32; not available in the simulator.'
                     : 'Waiting for the ESP32 odometer…'}</p>

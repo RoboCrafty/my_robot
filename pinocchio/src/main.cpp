@@ -119,6 +119,8 @@ struct SimEsp {
         rx.driver_ok_mask = power ? 0x3f : 0;
         rx.homed_mask = homed;
         rx.stat_id = 0xFF;      // no odometer in the simulator
+        rx.uart_fail_mask = 0;
+        rx.kept_power_mask = 0;
         gripper_pos = tx.gripper_pos;   // the slave has no travel time we model
 
         if (tx.motor_enable_mask & FLAG_REHOME) {
@@ -206,6 +208,24 @@ static std::array<std::atomic<uint32_t>, STAT_COUNT> g_odo{};
 static std::atomic<uint32_t> g_odo_seen{0};        // bit per STAT_* received since start
 static constexpr uint32_t ODO_ALL = (1u << STAT_COUNT) - 1;
 static bool odoComplete() { return (g_odo_seen.load() & ODO_ALL) == ODO_ALL; }
+// The on-disk mirror may only be (over)written once the ESP's data is known to
+// belong to it -- otherwise a replacement ESP's near-zero counters would wipe
+// the very backup needed to restore it.
+static std::atomic<bool>     g_mirror_ok{false};
+static std::atomic<bool>     g_odo_restoring{false};
+
+// Failed UART polls per joint since start (hardware only; see uart_fail_mask).
+static std::array<std::atomic<uint32_t>, 6> g_uart_glitches{};
+static std::string uartGlitchList() {
+    std::string s;
+    for (int i = 0; i < 6; i++)
+        if (g_uart_glitches[i]) s += " J" + std::to_string(i + 1) + ":" + std::to_string(g_uart_glitches[i]);
+    return s;
+}
+
+// JSON keys of the real counters, in STAT_* order (travel is an array).
+static const char* const ODO_KEYS[STAT_TRAVEL_J1] = {
+    "power_s", "servo_s", "motion_s", "power_cycles", "homings", "boots", "faults"};
 
 static std::string jointList(uint8_t mask) {
     std::string s;
@@ -230,10 +250,9 @@ static std::string fmtHours(uint32_t s) {
 
 static std::string odoJson() {
     std::ostringstream os;
-    os << "{\"power_s\":" << g_odo[STAT_POWER_S] << ",\"servo_s\":" << g_odo[STAT_SERVO_S]
-       << ",\"motion_s\":" << g_odo[STAT_MOTION_S] << ",\"power_cycles\":" << g_odo[STAT_POWER_CYCLES]
-       << ",\"homings\":" << g_odo[STAT_HOMINGS] << ",\"boots\":" << g_odo[STAT_BOOTS]
-       << ",\"faults\":" << g_odo[STAT_DRIVER_FAULTS] << ",\"travel_deg\":[";
+    os << "{";
+    for (int i = 0; i < STAT_TRAVEL_J1; i++) os << (i ? "," : "") << "\"" << ODO_KEYS[i] << "\":" << g_odo[i];
+    os << ",\"travel_deg\":[";
     for (int i = 0; i < 6; i++) os << (i ? "," : "") << g_odo[STAT_TRAVEL_J1 + i];
     os << "]}";
     return os.str();
@@ -241,9 +260,11 @@ static std::string odoJson() {
 
 // --- Records on the Pi: events.log (append-only) + odometer.json (mirror) ---
 // The ESP32's NVS is the master copy of the odometer; the mirror is there for
-// when that board gets replaced or erased. Lives in $PAROL_DATA_DIR (default
-// ~/.parol), outside the repo. All file I/O happens on its own thread, because
-// an SD-card fsync can stall for tens of ms -- far longer than a 2 ms tick.
+// when that board gets replaced or erased, and is then added back into the new
+// one automatically. Lives in $PAROL_DATA_DIR (default ~/.parol -- /root/.parol
+// when started via sudo), outside the repo. All file I/O happens on its own
+// thread, because an SD-card fsync can stall for tens of ms -- far longer than
+// a 2 ms tick.
 static std::mutex               g_rec_mtx;
 static std::condition_variable  g_rec_cv;
 static std::deque<std::string>  g_rec_events;   // guarded by g_rec_mtx
@@ -278,6 +299,42 @@ static bool writeFileAtomic(const std::string& path, const std::string& data) {
     return ok && rename(tmp.c_str(), path.c_str()) == 0;
 }
 
+// The mirror's own copy of the counters, plus which ESP storage they came from.
+struct OdoMirror {
+    bool     present = false;
+    bool     has_id  = false;            // files from before store ids carry none
+    uint32_t store_id = 0;
+    uint32_t v[STAT_COUNTERS] = {0};
+};
+
+// Reads the flat JSON this program writes itself: "key":number pairs and one
+// "travel_deg":[...] array, so a key search is all the parsing it needs.
+static OdoMirror loadMirror(const std::string& path) {
+    OdoMirror m;
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return m;
+    std::string s; char buf[512]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) s.append(buf, n);
+    fclose(f);
+    auto num = [&](const char* key, uint32_t& out) {
+        size_t p = s.find(std::string("\"") + key + "\":");
+        if (p == std::string::npos) return false;
+        out = (uint32_t)strtoul(s.c_str() + p + strlen(key) + 3, nullptr, 10);
+        return true;
+    };
+    for (int i = 0; i < STAT_TRAVEL_J1; i++) if (!num(ODO_KEYS[i], m.v[i])) return m;
+    size_t p = s.find("\"travel_deg\":[");
+    if (p == std::string::npos) return m;
+    const char* c = s.c_str() + p + 14;
+    for (int i = 0; i < 6; i++) {
+        char* end; m.v[STAT_TRAVEL_J1 + i] = (uint32_t)strtoul(c, &end, 10);
+        c = end; while (*c == ',' || *c == ' ') c++;
+    }
+    m.has_id = num("store_id", m.store_id);
+    m.present = true;
+    return m;
+}
+
 static void recorderThread() {
     const std::string dir = dataDir();
     mkdir(dir.c_str(), 0755);
@@ -299,11 +356,11 @@ static void recorderThread() {
             }
         }
         auto now = std::chrono::steady_clock::now();
-        if (odoComplete() && (stop || now - last_mirror >= std::chrono::seconds(60))) {
+        if (g_mirror_ok.load() && odoComplete() && (stop || now - last_mirror >= std::chrono::seconds(60))) {
             last_mirror = now;
-            std::string j = odoJson();
+            std::string j = "\"store_id\":" + std::to_string(g_odo[STAT_STORE_ID]) + ",\"odometer\":" + odoJson();
             if (j != last_odo &&
-                writeFileAtomic(odo_path, "{\"updated\":\"" + localTimestamp() + "\",\"odometer\":" + j + "}\n"))
+                writeFileAtomic(odo_path, "{\"updated\":\"" + localTimestamp() + "\"," + j + "}\n"))
                 last_odo = j;
         }
         if (stop) break;
@@ -582,10 +639,13 @@ static std::string handleCommand(const std::string& line) {
            << "  homed          " << (homed == 0x3f ? "yes" : "NO  (" + jointList(~homed & 0x3f) + ")") << "\n";
         std::string why = motionBlockReason();
         if (!why.empty()) os << "  motion         BLOCKED: " << why << "\n";
+        std::string glitches = uartGlitchList();
+        if (!glitches.empty()) os << "  UART glitches " << glitches << "   (failed driver polls since start)\n";
         if (g_sim.load()) {
             os << "  odometer       (simulator -- the real counters live on the ESP32)\n";
         } else if (!odoComplete()) {
-            os << "  odometer       (waiting for the ESP32 -- older firmware?)\n";
+            os << "  odometer       " << (g_odo_restoring ? "(restoring the saved totals into a new ESP32...)"
+                                                          : "(waiting for the ESP32 -- older firmware?)") << "\n";
         } else {
             os << "  power-on time  " << fmtHours(g_odo[STAT_POWER_S]) << "   (motor supply present)\n"
                << "  servo-on time  " << fmtHours(g_odo[STAT_SERVO_S]) << "   (motors energized)\n"
@@ -1113,6 +1173,7 @@ int main(int argc, char** argv) {
     g_driver_ok = rx_packet.driver_ok_mask & 0x3f;
     g_homed     = rx_packet.homed_mask & 0x3f;
     uint8_t prev_driver_ok = g_driver_ok;
+    uint8_t prev_fail = 0;
     if (g_driver_ok != 0x3f)
         std::cout << "[power] motor power OFF (" << jointList(~g_driver_ok & 0x3f)
                   << " not answering) -- plug it in, then 'rehome'\n";
@@ -1147,6 +1208,13 @@ int main(int argc, char** argv) {
     std::string stats_line;            // last [stats] row, redrawn with the monitor rows
     bool odo_announced = false;        // first complete odometer set has been logged
     uint32_t faults_prev = 0;
+    // Backup of the counters, read once: decides whether the ESP needs restoring.
+    const OdoMirror mirror = loadMirror(dataDir() + "/odometer.json");
+    struct OdoOp { uint8_t op, id; uint32_t value; };
+    std::vector<OdoOp> odo_ops;        // restore sequence; empty unless a new ESP was found
+    size_t  odo_op_idx = 0;
+    uint8_t odo_seq = 0;
+    bool    odo_verify = false;        // committed; log once the fresh totals arrive
 
     // Cartesian state, owned exclusively by this loop.
     Mode mode = Mode::Joint;
@@ -1219,9 +1287,41 @@ int main(int argc, char** argv) {
                                  + (odoComplete() ? ", power-on total " + fmtHours(g_odo[STAT_POWER_S]) : ""));
             }
             if (back) {
-                std::cout << "[power] motor power back (" << jointList(back) << "), drivers reconfigured"
-                          << (ok == 0x3f ? " -- 'rehome' before moving\n" : "\n");
-                if (hw) logEvent("motor power restored (" + jointList(back) + ")");
+                // Came back without a chip reset = the driver never lost power;
+                // only its UART link dropped (socket/solder joint, address pins).
+                const uint8_t comms = back & rx_packet.kept_power_mask, power = back & ~comms;
+                if (power) {
+                    std::cout << "[power] motor power back (" << jointList(power) << "), drivers reconfigured"
+                              << (ok == 0x3f ? " -- 'rehome' before moving\n" : "\n");
+                    if (hw) logEvent("motor power restored (" + jointList(power) + ")");
+                }
+                if (comms) {
+                    std::cout << "[power] " << jointList(comms) << " answering again -- it NEVER lost power (no chip"
+                                 " reset): a UART dropout, not a power problem. Rehome before moving.\n";
+                    if (hw) logEvent("UART dropout ended (" + jointList(comms)
+                                     + ") -- driver kept power, so the fault is the UART link, not power");
+                }
+            }
+        }
+
+        // Every failed poll of a driver, even ones too short to count as a
+        // dropout: the live readout for wiggle-testing a flaky connection.
+        if (hw) {
+            const uint8_t fails = rx_packet.uart_fail_mask & 0x3f, rising = fails & ~prev_fail;
+            prev_fail = fails;
+            for (int i = 0; i < 6; i++) if (rising & (1u << i)) g_uart_glitches[i]++;
+        }
+
+        // Odometer restore in flight: one op at a time, each repeated in every
+        // packet until the ESP echoes its seq (see ODO_* in protocol.h).
+        if (hw && odo_op_idx < odo_ops.size() && rx_packet.odo_ack == odo_seq) {
+            if (++odo_op_idx < odo_ops.size()) {
+                odo_seq = (uint8_t)(odo_seq == 255 ? 1 : odo_seq + 1);
+            } else {
+                // Committed and saved on the ESP. Re-collect the whole set so
+                // nothing pre-restore is reported or mirrored.
+                g_odo_seen = 0;
+                odo_verify = true;
             }
         }
 
@@ -1230,16 +1330,49 @@ int main(int argc, char** argv) {
         g_odo_seen.fetch_or(1u << rx_packet.stat_id);
         if (!odoComplete()) return;
         const uint32_t faults = g_odo[STAT_DRIVER_FAULTS];
-        if (!odo_announced) {
-            odo_announced = true;
-            faults_prev = faults;
-            logEvent("odometer: power-on " + fmtHours(g_odo[STAT_POWER_S])
+        auto odoSummary = [&] {
+            std::string s = "power-on " + fmtHours(g_odo[STAT_POWER_S])
                      + ", servo-on " + fmtHours(g_odo[STAT_SERVO_S])
                      + ", motion " + fmtHours(g_odo[STAT_MOTION_S])
                      + ", power cycles " + std::to_string(g_odo[STAT_POWER_CYCLES])
                      + ", homings " + std::to_string(g_odo[STAT_HOMINGS])
                      + ", ESP32 boots " + std::to_string(g_odo[STAT_BOOTS])
-                     + ", driver faults " + std::to_string(faults));
+                     + ", driver faults " + std::to_string(g_odo[STAT_DRIVER_FAULTS]) + ", travel deg";
+            for (int i = 0; i < 6; i++) s += " J" + std::to_string(i + 1) + " " + std::to_string(g_odo[STAT_TRAVEL_J1 + i]);
+            return s;
+        };
+        if (!odo_announced) {
+            odo_announced = true;
+            faults_prev = faults;
+            logEvent("odometer: " + odoSummary());
+
+            // Does the ESP's data belong to the backup? A new or erased ESP has a
+            // new store id; one already restored from this backup says so.
+            const uint32_t esp_id = g_odo[STAT_STORE_ID];
+            const bool same = !mirror.present || !mirror.has_id || mirror.store_id == esp_id
+                           || g_odo[STAT_RESTORED_FROM] == mirror.store_id;
+            if (same) {
+                g_mirror_ok = true;
+            } else {
+                odo_ops.push_back({ODO_BEGIN, 0, 0});
+                for (int i = 0; i < STAT_COUNTERS; i++)
+                    if (mirror.v[i]) odo_ops.push_back({ODO_ADD, (uint8_t)i, mirror.v[i]});
+                odo_ops.push_back({ODO_COMMIT, 0, mirror.store_id});
+                odo_op_idx = 0;
+                odo_seq = (uint8_t)(rx_packet.odo_ack == 255 ? 1 : rx_packet.odo_ack + 1);
+                g_odo_restoring = true;
+                std::cout << "[odometer] new ESP32 storage (id " << esp_id << ", backup is from id "
+                          << mirror.store_id << ") -- adding the saved totals into it\n";
+                logEvent("odometer: new ESP32 storage (id " + std::to_string(esp_id) + "), restoring backup from id "
+                         + std::to_string(mirror.store_id));
+            }
+        } else if (odo_verify) {
+            odo_verify = false;
+            g_odo_restoring = false;
+            g_mirror_ok = true;
+            faults_prev = faults;
+            std::cout << "[odometer] restored: " << odoSummary() << "\n";
+            logEvent("odometer restored: " + odoSummary());
         } else if (faults != faults_prev) {
             faults_prev = faults;
             std::cout << "[power] TMC driver fault (over-temperature or short) -- " << faults << " total\n";
@@ -1265,6 +1398,8 @@ int main(int argc, char** argv) {
                     ok == 0x3f ? "ok" : ("OFF " + jointList(~ok & 0x3f)).c_str(),
                     hm == 0x3f ? "ok" : ("NO " + jointList(~hm & 0x3f)).c_str());
                 stats_line = sl;
+                std::string g = uartGlitchList();
+                if (!g.empty()) stats_line += "  uart glitches" + g;
                 if (!g_monitor.load()) statusDraw({stats_line});
             }
             underruns_prev = rx_packet.underruns;
@@ -1791,6 +1926,13 @@ int main(int argc, char** argv) {
                         tx_packet.flags |= (uint8_t)((g_rehome_joint & 0x7) << REHOME_JOINT_SHIFT);
                     g_rehome_request = false;
                     g_sync_request = false; }
+        if (odo_op_idx < odo_ops.size()) {
+            const OdoOp& o = odo_ops[odo_op_idx];
+            tx_packet.odo_op = o.op; tx_packet.odo_seq = odo_seq;
+            tx_packet.odo_id = o.id; tx_packet.odo_value = o.value;
+        } else {
+            tx_packet.odo_op = ODO_NONE;
+        }
         output.pass_to_input(input);
 
         // 2. Send Velocity Command (COBS-framed + CRC16)

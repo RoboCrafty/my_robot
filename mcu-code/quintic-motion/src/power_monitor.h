@@ -35,6 +35,10 @@ inline volatile uint8_t homed_mask = 0;          // homed since the driver last 
 inline volatile uint8_t lost_mask  = 0;          // newly lost, not yet handled by the loop task
 inline volatile uint8_t applied_enable_mask = 0x3f; // torque requested by the host; guarded by TmcLock
 inline volatile uint32_t fault_events = 0;       // drv_err rising edges (over-temp / short)
+// Diagnostics, bit i = joint i+1:
+inline volatile uint8_t fail_mask = 0;           // most recent poll of that driver got no valid reply
+inline volatile uint8_t kept_power_mask = 0;     // came back WITHOUT GSTAT.reset: the chip never lost
+                                                 // power, so the outage was UART-only (wiring/address)
 
 inline uint8_t misses[6] = {0};                  // task-only
 inline uint32_t answering_since[6] = {0};        // task-only; 0 = not in a settle window
@@ -67,9 +71,16 @@ inline void markLost(uint8_t bit) {
     portEXIT_CRITICAL(&mux);
 }
 
-inline void markReady(uint8_t bit) {
+inline void markReady(uint8_t bit, bool kept_power) {
     portENTER_CRITICAL(&mux);
     ready_mask |= bit;
+    if (kept_power) kept_power_mask |= bit; else kept_power_mask &= (uint8_t)~bit;
+    portEXIT_CRITICAL(&mux);
+}
+
+inline void setFailed(uint8_t bit, bool failed) {
+    portENTER_CRITICAL(&mux);
+    if (failed) fail_mask |= bit; else fail_mask &= (uint8_t)~bit;
     portEXIT_CRITICAL(&mux);
 }
 
@@ -80,11 +91,13 @@ inline void pollDriver(uint8_t i) {
     uint8_t gstat = d->GSTAT();
 
     if (d->CRCerror) {                               // no (valid) reply: VM is gone
+        setFailed(bit, true);
         answering_since[i] = 0;                      // restart the settle window
         if (misses[i] < 255) misses[i]++;
         if (misses[i] >= MISS_LIMIT && (ready_mask & bit)) markLost(bit);
         return;
     }
+    setFailed(bit, false);
     misses[i] = 0;
 
     if (!(ready_mask & bit) || (gstat & GSTAT_RESET)) {
@@ -97,10 +110,13 @@ inline void pollDriver(uint8_t i) {
         if (!answering_since[i]) { answering_since[i] = now ? now : 1; return; }
         if (now - answering_since[i] < SETTLE_MS) return;
         answering_since[i] = 0;
+        // GSTAT.reset is only set by a real power-up of the chip; it is still
+        // latched here because nothing has cleared it during the settle wait.
+        const bool kept_power = !(gstat & GSTAT_RESET);
         configureDriver(i, applied_enable_mask & bit);
         d->GSTAT(0b111);
         fault_latched &= (uint8_t)~bit;
-        markReady(bit);
+        markReady(bit, kept_power);
         return;
     }
 

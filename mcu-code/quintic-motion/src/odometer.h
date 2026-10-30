@@ -35,6 +35,11 @@ inline uint8_t  prev_ready = 0;
 inline uint32_t prev_faults = 0;
 inline uint8_t  tx_id = 0;
 
+// Restore staging (see ODO_*). RAM only: a restore cut short is just dropped.
+inline uint32_t pending[STAT_COUNTERS] = {0};
+inline bool     staging = false;
+inline uint8_t  last_seq = 0;            // 0 = nothing applied since boot; the host uses 1..255
+
 inline void save(uint32_t now) {
     prefs.putBytes("v", v, sizeof(v));
     dirty = false;
@@ -53,6 +58,10 @@ inline void begin(const float* spd) {
     memcpy(v, buf, sizeof(v));
 
     v[STAT_BOOTS]++;
+    // Identifies THIS copy of the data. Generated only when NVS had none, so a
+    // replacement or erased board always reports a new id and the host knows to
+    // restore its saved totals. 0 and 1 are reserved for the host's records.
+    while (v[STAT_STORE_ID] < 2) v[STAT_STORE_ID] = esp_random();
     prev_ready  = Power::ready();
     prev_faults = Power::fault_events;
     last_update_ms = last_motion_ms = millis();
@@ -116,6 +125,32 @@ inline void fillPacket(EspToPiPacket& p) {
     p.stat_id = tx_id;
     p.stat_value = v[tx_id];
     tx_id = (uint8_t)((tx_id + 1) % STAT_COUNT);
+    p.odo_ack = last_seq;
+}
+
+// The host repeats each op until it sees odo_ack == odo_seq, so an op is
+// applied only when the seq changes. Called from the packet handler (loop task).
+inline void handleOp(const PiToEspPacket& p) {
+    if (p.odo_op == ODO_NONE || p.odo_seq == last_seq) return;
+    last_seq = p.odo_seq;
+    switch (p.odo_op) {
+        case ODO_BEGIN:
+            memset(pending, 0, sizeof(pending));
+            staging = true;
+            break;
+        case ODO_ADD:
+            if (staging && p.odo_id < STAT_COUNTERS) pending[p.odo_id] += p.odo_value;
+            break;
+        case ODO_COMMIT:
+            if (!staging) break;
+            for (int i = 0; i < STAT_COUNTERS; i++) v[i] += pending[i];
+            v[STAT_RESTORED_FROM] = p.odo_value;
+            staging = false;
+            // Saved right away despite the brief flash stall: this happens once,
+            // while the host is just starting up and the arm is holding still.
+            save(millis());
+            break;
+    }
 }
 
 } // namespace Odometer
