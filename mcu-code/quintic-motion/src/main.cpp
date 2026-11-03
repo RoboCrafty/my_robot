@@ -77,6 +77,7 @@ uint32_t movetimed_underruns  = 0;                         // diagnostics: queue
 int32_t tick_error[6] = {0, 0, 0, 0, 0, 0};                // Tracks accumulated timer quantization error per axis (in ticks)
 void printLimitSwitchStates();
 void handleLostDrivers();
+void readGripperTargetFromSerial();
 void setup() {
     // Headroom for the Pi's 500 Hz stream while the loop is briefly busy (an
     // odometer flash write, a driver enable over UART): with the default 256 B
@@ -405,6 +406,7 @@ void loop() {
     // Pumps the UART: reads bytes, un-stuffs COBS frames, fires onPacket().
     packetSerial.update();
     handleLostDrivers();   // also when the host isn't streaming
+    // readGripperTargetFromSerial();
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
@@ -417,6 +419,45 @@ void loop() {
 void moveJoint()
 {
 
+}
+
+void readGripperTargetFromSerial()
+{
+    static bool prompt_due = true;
+    static char input[16];
+    static size_t input_length = 0;
+    static bool input_too_long = false;
+
+    if (prompt_due) {
+        Serial.printf("Enter gripper target (0-%u):\n", GRIPPER_POS_MAX);
+        prompt_due = false;
+    }
+
+    while (Serial.available() > 0) {
+        char ch = Serial.read();
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+            if (input_length > 0 || input_too_long) {
+                input[input_length] = '\0';
+                int target;
+                char extra;
+                if (!input_too_long && sscanf(input, "%d %c", &target, &extra) == 1 &&
+                    target >= 0 && target <= GRIPPER_POS_MAX) {
+                    Gripper::setTarget(static_cast<uint8_t>(target));
+                    Serial.println("Gripper target queued for ESP-NOW.");
+                } else {
+                    Serial.printf("Invalid target. Enter an integer from 0 to %u.\n", GRIPPER_POS_MAX);
+                }
+                prompt_due = true;
+            }
+            input_length = 0;
+            input_too_long = false;
+        } else if (input_length < sizeof(input) - 1) {
+            input[input_length++] = ch;
+        } else {
+            input_too_long = true;
+        }
+    }
 }
 
 void printLimitSwitchStates()
