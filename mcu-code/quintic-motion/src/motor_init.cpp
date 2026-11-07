@@ -51,6 +51,23 @@ void tmcLockInit()
 TmcLock::TmcLock()  { xSemaphoreTake(tmc_mutex, portMAX_DELAY); }
 TmcLock::~TmcLock() { xSemaphoreGive(tmc_mutex); }
 
+// Torque on/off without stopping the chopper: switching toff 0 -> n restarts the
+// TMC2209's stealthChop self-calibration, and the first moves afterwards are
+// rough until it re-learns. With zero hold current and freewheel the motor is
+// free, and nothing else about the driver changes.
+static void setTorque(uint8_t idx, bool on)
+{
+    TMC2209Stepper& d = *DRIVERS[idx];
+    const DriverCfg& c = CFG[idx];
+    if (on) {
+        d.freewheel(0);
+        d.rms_current(c.current, c.hold_multiplier);
+    } else {
+        d.rms_current(c.current, 0.0f);
+        d.freewheel(1);
+    }
+}
+
 // Writes the full register set. TMCStepper keeps shadow copies of every
 // register, so this also restores a driver that lost VM and reset to its OTP
 // defaults (wrong microstepping, analog current scaling).
@@ -60,14 +77,15 @@ void configureDriver(uint8_t idx, bool energize)
     const DriverCfg& c = CFG[idx];
     d.begin();
     d.blank_time(20);
-    d.en_spreadCycle(false);
+    d.en_spreadCycle(Constants::Config::FORCE_SPREADCYCLE);
     d.TCOOLTHRS(0);
     d.microsteps(c.microsteps);
     d.intpol(true);
     d.I_scale_analog(0);
     d.rms_current(c.current, c.hold_multiplier);
     d.TPWMTHRS(c.tpwmthrs);
-    d.toff(energize ? c.toff_on : 0);
+    d.toff(c.toff_on);   // the chopper always runs; torque is switched with the hold current
+    if (!energize) setTorque(idx, false);
 }
 
 uint8_t initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool start_J4, bool start_J5, bool start_J6)
@@ -105,10 +123,10 @@ uint8_t initJoints(bool debug, bool start_J1, bool start_J2, bool start_J3, bool
 
 void turnDriverOff(uint motorNo)
 {
-    if (motorNo >= 1 && motorNo <= 6) DRIVERS[motorNo - 1]->toff(0);
+    if (motorNo >= 1 && motorNo <= 6) setTorque(motorNo - 1, false);
 }
 
 void turnDriverOn(uint motorNo)
 {
-    if (motorNo >= 1 && motorNo <= 6) DRIVERS[motorNo - 1]->toff(2);
+    if (motorNo >= 1 && motorNo <= 6) setTorque(motorNo - 1, true);
 }

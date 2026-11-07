@@ -53,6 +53,10 @@ namespace Constants {
 
     namespace Config {
         // =============== Constants and Configurations ===============
+        // true: spreadCycle everywhere (no stealthChop self-calibration, so motion
+        // quality can't depend on what the driver did since it was last powered).
+        // false: stealthChop below each joint's TPWMTHRS (quieter).
+        constexpr bool FORCE_SPREADCYCLE = false;
         constexpr uint16_t J1_CURRENT = 1800;
         constexpr uint16_t J2_CURRENT = 1800;
         constexpr uint16_t J3_CURRENT = 1600;

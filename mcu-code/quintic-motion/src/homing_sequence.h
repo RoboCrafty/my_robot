@@ -177,6 +177,23 @@ inline void restoreNormalMotion(uint8_t joint)
     s->applySpeedAcceleration();
 }
 
+// forceStopAndNewPosition() leaves FastAccelStepper's queue in ignore_commands
+// mode, where addQueueEntry() reports success but silently drops every step.
+// Only a ramp-generator move clears it -- moveTimed() does not -- so after a
+// force-stop the feeder would "queue" steps that never run, and the arm stutters
+// and drifts until a rehome (whose moveTo() clears the flag as a side effect).
+// A one-step ramp move clears it; the counter is then put back.
+inline void forceStopAt(uint8_t i, int32_t pos)
+{
+    FastAccelStepper* s = steppers[i];
+    s->forceStopAndNewPosition(pos);
+    restoreNormalMotion(i + 1);
+    s->moveTo(pos + 1);
+    const uint32_t t0 = millis();
+    while (s->isRunning() && millis() - t0 < 50) {}
+    s->setCurrentPosition(pos);
+}
+
 // homeAxis() returns once its final moveTo() is QUEUED, not once the axis has
 // arrived -- so anything sequencing on it must wait explicitly. The old fixed
 // delay(3000) was a guess, and J5's 123-degree return alone runs at 1000 Hz,
@@ -203,8 +220,7 @@ inline void finishJ6Home()
 
 inline void abortAllMotion()
 {
-    for (int i = 0; i < 6; i++) steppers[i]->forceStopAndNewPosition(steppers[i]->getCurrentPosition());
-    for (int i = 1; i <= 6; i++) restoreNormalMotion(i);
+    for (int i = 0; i < 6; i++) forceStopAt(i, steppers[i]->getCurrentPosition());
 }
 
 // The full six-axis sequence, shared by boot and the runtime rehome command so

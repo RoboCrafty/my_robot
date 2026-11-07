@@ -159,7 +159,7 @@ void handleLostDrivers() {
     for (int i = 0; i < 6; i++) {
         if (!(lost & (1u << i))) continue;
         int32_t p = steppers[i]->getCurrentPosition();
-        steppers[i]->forceStopAndNewPosition(p);
+        forceStopAt(i, p);
         queued_steps[i] = p;
         tick_error[i] = 0;
     }
@@ -196,7 +196,7 @@ void onPacket(const uint8_t* buffer, size_t size) {
                     turnDriverOn(i + 1);
                 } else {
                     int32_t executed_steps = steppers[i]->getCurrentPosition();
-                    steppers[i]->forceStopAndNewPosition(executed_steps);
+                    forceStopAt(i, executed_steps);
                     queued_steps[i] = executed_steps;
                     turnDriverOff(i + 1);
                 }
