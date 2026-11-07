@@ -175,7 +175,14 @@ function onBlock(block, busy) {
     }
     toast.dismiss('sigma');
     // Updating a toast by id merges options, so a stale Rehome action must be cleared explicitly.
-    if (block.startsWith('motor power off')) {
+    if (block.startsWith('parked')) {
+        toast.info('Parked — torque off', {
+            id: 'power', duration: Infinity, action: undefined,
+            description: 'Safe to unplug motor power. After re-plugging, press Unpark (no rehome needed).',
+        });
+    } else if (block.startsWith('motors energizing')) {
+        toast.loading('Energizing motors…', { id: 'power', duration: 3000, action: undefined });
+    } else if (block.startsWith('motor power off')) {
         toast.error('Motor power off', {
             id: 'power', duration: Infinity, action: undefined,
             description: 'Drivers are not answering. Plug in the motor supply, then rehome.',

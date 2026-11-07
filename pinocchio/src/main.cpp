@@ -201,6 +201,18 @@ static bool   g_sync_request = false;     // guarded by g_mtx
 // have dropped, so the step counters no longer describe where it is.
 static std::atomic<uint8_t>  g_driver_ok{0x3f};
 static std::atomic<uint8_t>  g_homed{0x3f};
+// Parked: arm rested on the floor with torque off so the motor supply can be
+// unplugged. The ESP32 keeps its step counters across a motor-power cycle, but
+// reports the joints un-homed once the drivers come back; while parked (and
+// after 'unpark', until power is lost again) that is overridden by g_assumed_homed.
+static std::atomic<bool>     g_parked{false};
+static std::atomic<long long> g_settle_until_ms{0};   // motion blocked until then (drivers energizing after unpark)
+static long long nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static std::atomic<uint8_t>  g_assumed_homed{0};
+static double                g_park_pos[DOFs] = {};   // joint angles at park time; guarded by g_mtx
+static std::array<std::atomic<float>, DOFs> g_actual_pos{};   // latest feedback from the ESP32
 static std::atomic<bool>     g_sim_power{true};    // 'simpower on|off', applied to SimEsp by the loop
 
 // Lifetime odometer, kept in the ESP32's NVS and streamed one counter per reply.
@@ -236,10 +248,22 @@ static std::string jointList(uint8_t mask) {
 
 // Why motion commands are currently refused, or "" if they are allowed.
 static std::string motionBlockReason() {
+    if (g_parked.load()) return "parked (torque off) -- 'unpark' first";
+    if (nowMs() < g_settle_until_ms.load()) return "motors energizing -- wait a moment";
     uint8_t ok = g_driver_ok.load(), homed = g_homed.load();
     if (ok != 0x3f)    return "motor power off (" + jointList(~ok & 0x3f) + ")";
     if (homed != 0x3f) return "not homed (" + jointList(~homed & 0x3f) + ") -- rehome first";
     return "";
+}
+
+// Publishes motor power and homing from an ESP32 reply. Outside a park, a lost
+// driver voids the assumed homing so the normal rehome requirement returns.
+static void applyEspStatus(const EspToPiPacket& rx) {
+    const uint8_t ok = rx.driver_ok_mask & 0x3f;
+    g_driver_ok = ok;
+    for (int i = 0; i < DOFs; i++) g_actual_pos[i] = rx.actual_position[i];
+    if (!g_parked.load()) g_assumed_homed &= ok;
+    g_homed = (rx.homed_mask | g_assumed_homed.load()) & 0x3f;
 }
 
 static std::string fmtHours(uint32_t s) {
@@ -550,6 +574,8 @@ static const char* HELP_TEXT =
     "  ready               go to the singularity-free ready pose\n"
     "  rehome              run the ESP32 limit-switch homing sequence (all joints)\n"
     "  rehome <1..6>       home just that joint (homing J5 also re-homes J6 first)\n"
+    "  park                torque off after standby; motor supply can then be unplugged\n"
+    "  unpark              after re-plugging motor power: torque on, no rehome\n"
     "  stop                decelerate to a stop and hold\n"
     "  sync                align planner to motor feedback without motion\n"
     "  sim <on|off>        run against the built-in ESP32 simulator\n"
@@ -780,6 +806,11 @@ static std::string handleCommand(const std::string& line) {
             return "usage: rehome [1..6]";
         }
         std::lock_guard<std::mutex> lk(g_mtx);
+        g_parked = false;
+        // Only the joints being re-homed lose their assumed homing; the ESP
+        // reports them homed again once the run succeeds.
+        if (j == 0) g_assumed_homed = 0;
+        else g_assumed_homed &= (uint8_t)~((1u << (j - 1)) | (j == 5 ? (1u << 5) : 0));
         if (j == 0) {
             g_motor_enable_mask = 0x3f;
         } else {
@@ -856,8 +887,40 @@ static std::string handleCommand(const std::string& line) {
         return "moving to ready pose";
     }
 
+    if (tok[0] == "park") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_parked) return "already parked";
+        std::string why = motionBlockReason();
+        if (!why.empty()) return "refused: " + why;
+        for (int i = 0; i < DOFs; i++) g_park_pos[i] = g_actual_pos[i].load();
+        g_assumed_homed = 0x3f;
+        g_parked = true;
+        g_stop_request = true;
+        clearJogLocked();
+        // The enable mask stays set on purpose: when motor power returns, the ESP
+        // re-initializes each driver using that mask, so it comes back energized
+        // and configured exactly as after a rehome. Unplugging is what removes torque.
+        return "parked: motion blocked, safe to unplug motor power";
+    }
+    if (tok[0] == "unpark") {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (!g_parked) return "not parked";
+        uint8_t ok = g_driver_ok.load();
+        if (ok != 0x3f) return "refused: motor power off (" + jointList(~ok & 0x3f) + ") -- plug it in and wait for the drivers";
+        // A reset ESP32 loses its step counters and would report zeros.
+        for (int i = 0; i < DOFs; i++)
+            if (std::fabs(g_actual_pos[i].load() - g_park_pos[i]) > 1.0)
+                return "refused: J" + std::to_string(i + 1) + " position differs from park (ESP32 reset?) -- rehome";
+        g_parked = false;
+        g_sync_request = true;
+        g_motor_enable_mask = 0x3f;
+        g_settle_until_ms = nowMs() + 1500;
+        return "unparked: torque on";
+    }
+
     if (tok[0] == "motor") {
         if (tok.size() != 3 || (tok[2] != "on" && tok[2] != "off")) return "usage: motor <j|all> <on|off>";
+        if (g_parked && tok[2] == "on") return "parked: use 'unpark'";
         std::lock_guard<std::mutex> lk(g_mtx);
         uint8_t bits = 0;
         if (tok[1] == "all") bits = 0x3f;
@@ -872,7 +935,10 @@ static std::string handleCommand(const std::string& line) {
             // A disabled joint has no holding torque, so it may have been moved
             // by hand in the meantime. Re-enabling must adopt real feedback as
             // the planner state first, or it would snap back to a stale target.
-            if (bits & ~g_motor_enable_mask) g_sync_request = true;
+            if (bits & ~g_motor_enable_mask) {
+                g_sync_request = true;
+                g_settle_until_ms = nowMs() + 1500;   // let the chopper settle at standstill before stepping
+            }
             g_motor_enable_mask |= bits;
         } else {
             g_motor_enable_mask &= (uint8_t)~bits;
@@ -1170,8 +1236,7 @@ int main(int argc, char** argv) {
 
     // What the arm looks like right now: the ESP32 skips its boot homing when
     // motor power is off, and the planner must not trust the counters until homed.
-    g_driver_ok = rx_packet.driver_ok_mask & 0x3f;
-    g_homed     = rx_packet.homed_mask & 0x3f;
+    applyEspStatus(rx_packet);
     uint8_t prev_driver_ok = g_driver_ok;
     uint8_t prev_fail = 0;
     if (g_driver_ok != 0x3f)
@@ -1274,8 +1339,7 @@ int main(int argc, char** argv) {
         }
 
         const uint8_t ok = rx_packet.driver_ok_mask & 0x3f;
-        g_driver_ok = ok;
-        g_homed     = rx_packet.homed_mask & 0x3f;
+        applyEspStatus(rx_packet);
         if (ok != prev_driver_ok) {
             const uint8_t lost = prev_driver_ok & ~ok, back = ok & ~prev_driver_ok;
             prev_driver_ok = ok;
@@ -2062,7 +2126,8 @@ int main(int argc, char** argv) {
                     // `block` is why motion is refused ("" = allowed); `odo` is null
                     // until every ESP32 counter has arrived (and in the simulator).
                     std::string msg(sb, (size_t)len);
-                    msg += "\"block\":\"" + motionBlockReason() + "\",\"odo\":"
+                    msg += std::string("\"parked\":") + (g_parked.load() ? "true" : "false")
+                         + ",\"block\":\"" + motionBlockReason() + "\",\"odo\":"
                          + (!simulating && odoComplete() ? odoJson() : std::string("null")) + "}";
                     for (auto& cli : targets) sendto(g_udp_fd, msg.data(), msg.size(), 0, (sockaddr*)&cli, sizeof(cli));
                 }

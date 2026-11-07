@@ -1,5 +1,5 @@
 import { motion } from 'motion/react';
-import { cmd, setPref, stopEverything, useStore, hardStop } from '../store.js';
+import { cmd, send, setPref, stopEverything, useStore, hardStop } from '../store.js';
 import { Icon } from './Icon.jsx';
 
 export function TopBar() {
@@ -38,6 +38,14 @@ export function TopBar() {
                     </motion.button>
                     <motion.button whileTap={{ scale: 0.95 }} className="pill" onClick={() => cmd('ready')}>
                         <Icon name="ready" size={14} /> Ready
+                    </motion.button>
+                    <motion.button whileTap={{ scale: 0.95 }} className="pill" title="Run the Standby program, then turn torque off so motor power can be unplugged"
+                        onClick={() => { if (confirm('Move to standby and turn motor torque off?')) send({ type: 'standby' }); }}>
+                        Park
+                    </motion.button>
+                    <motion.button whileTap={{ scale: 0.95 }} className="pill" title="After re-plugging motor power: torque on, no rehome"
+                        onClick={() => cmd('unpark')}>
+                        Unpark
                     </motion.button>
                     <motion.button whileTap={{ scale: 0.95 }} className="pill danger-text"
                         onClick={() => { if (confirm('Rehome all joints using the limit switches?')) cmd('rehome'); }}>
