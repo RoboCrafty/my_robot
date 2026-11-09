@@ -1,0 +1,13 @@
+# Python 3.12 is required; see pyproject.toml.
+# From this directory, install with: uv pip install -r requirements.txt
+
+# Local robot package: installs LeRobot core, pynput, and pyzmq dependencies.
+-e .
+
+# Dataset capture/review support plus Pi0 and SmolVLA policy dependencies.
+lerobot[dataset,pi,smolvla]>=0.6.1
+
+# Required by pinocchio/src/mj_sim.py for MuJoCo simulation.
+mujoco>=3.3,<4
+
+# review_episodes.py also requires the system ffmpeg executable (brew install ffmpeg on macOS).
