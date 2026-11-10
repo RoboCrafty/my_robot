@@ -29,7 +29,7 @@ def send_cmd(cmd: str) -> None:
 
 # --- iOS app connection -------------------------------------------------------
 APP_PORT = 8000
-GRIPPER_POS_MAX = 140  # see pinocchio/src/protocol.h
+GRIPPER_POS_MAX = 140  # see rpi-controller/src/protocol.h
 IDENTITY_QUAT = np.array([0.0, 0.0, 0.0, 1.0])  # scipy quat order: x, y, z, w
 
 

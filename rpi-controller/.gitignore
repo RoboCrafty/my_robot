@@ -1,4 +1,4 @@
-# Anchored to pinocchio/ -- unanchored "build*" also swallowed
+# Anchored to rpi-controller/ -- unanchored "build*" also swallowed
 # web/static/vendor/three/build/, silently breaking the web UI on deploy.
 /build*
 /CMakeFiles*

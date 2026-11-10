@@ -17,7 +17,7 @@
             "cppStandard": "c++14",
             "intelliSenseMode": "macos-clang-arm64",
             "compileCommands": [
-                "${workspaceFolder}/pinocchio/build/compile_commands.json"
+                "${workspaceFolder}/rpi-controller/build/compile_commands.json"
             ]
         }
     ],
