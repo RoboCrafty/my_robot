@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <cmath>
 #include <algorithm>
 #include <cstdlib>
 #include <cctype>
@@ -896,6 +897,8 @@ int main(int argc, char** argv) {
     bool   lin_direct = false;     // this tick's output comes from q_ref, not from ruck
     double last_sigma_min = 0.0;   // published to the UI as a singularity gauge
     bool   sing_warned = false;    // rate-limits the "blocked" message
+    std::array<double, DOFs> last_good_pos;  // last finite setpoint (deg), fallback for the NaN guard
+    for (int i = 0; i < DOFs; i++) last_good_pos[i] = input.current_position[i];
 
     // Twist ramp for CartVel (hold-jog). Ruckig<6> in Position mode where the
     // "position" IS the twist itself -- lets g_cart_amax/jmax (and the
@@ -1416,6 +1419,35 @@ int main(int argc, char** argv) {
                     if (std::abs(output.new_velocity[i]) > 1e-3) { moving = true; break; }
             }
             g_busy = moving;
+        }
+
+        // A non-finite setpoint latches: it feeds back into Ruckig's state and the motor position, so every
+        // later command is planned from NaN and the arm never moves again. Drop it and hold the last good pose.
+        {
+            bool finite = true;
+            for (int i = 0; i < DOFs; i++)
+                finite = finite && std::isfinite(output.new_position[i]) && std::isfinite(output.new_velocity[i])
+                                && std::isfinite(output.new_acceleration[i]);
+            if (finite) {
+                for (int i = 0; i < DOFs; i++) last_good_pos[i] = output.new_position[i];
+            } else {
+                std::fprintf(stderr, "[safety] non-finite setpoint in %s mode -- holding last good pose\n",
+                             mode == Mode::Joint ? "joint" : mode == Mode::CartVel ? "cartvel" : "cartlin");
+                for (int i = 0; i < DOFs; i++) {
+                    output.new_position[i] = last_good_pos[i];
+                    output.new_velocity[i] = 0.0;
+                    output.new_acceleration[i] = 0.0;
+                    input.target_position[i] = last_good_pos[i];
+                    q_ref[i] = last_good_pos[i] * D2R;
+                }
+                dq_ref.setZero();
+                mode = Mode::Joint;
+                input.control_interface = ControlInterface::Position;
+                g_jog_initialized = false;
+                std::lock_guard<std::mutex> lk(g_mtx);
+                clearJogLocked();
+                for (int i = 0; i < DOFs; i++) g_target[i] = last_good_pos[i];
+            }
         }
 
         // Pass output state to the next cycle's input

@@ -76,8 +76,8 @@ while True:
     next_time += period
     # send_cmd(f"cartjogvel x {vx:.4f}")
     
-    # if state
-    #     print("pos", state["pos"], "tcp", state["tcp"], "busy", state["busy"])
+    if state
+        print("pos", state["pos"], "tcp", state["tcp"], "busy", state["busy"])
 
     target_angle = math.sin(current_time) * sin_scale
     send_cmd(f"{target_angle:.4f} {target_angle:.4f} {target_angle:.4f} {target_angle:.4f} {target_angle:.4f} {target_angle:.4f}")

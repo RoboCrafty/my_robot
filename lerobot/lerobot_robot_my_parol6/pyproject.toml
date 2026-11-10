@@ -1,0 +1,18 @@
+[project]
+name = "lerobot_robot_my_parol6"
+version = "0.1.0"
+description = "Lerobot Parol6 integration"
+readme = "README.md"
+authors = [
+    { name = "RoboCrafty", email = "fuzailhamid2002@gmail.com" }
+]
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "lerobot>=0.6.1",
+    "pynput>=1.8.2",
+    "pyzmq>=27.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
