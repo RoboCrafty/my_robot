@@ -10,11 +10,12 @@ Deps: pip install fastapi "uvicorn[standard]"
 """
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -135,6 +136,8 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def index():
+    if os.environ.get("PAROL_DEFAULT_UI") == "next":
+        return RedirectResponse("/next/")
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -453,4 +456,4 @@ async def commit() -> None:
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

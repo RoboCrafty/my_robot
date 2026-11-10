@@ -1,0 +1,14 @@
+.git
+.venv
+.vscode
+STLs
+blender-stuff
+calculations
+misc_scripts
+lerobot
+**/.pio
+**/node_modules
+**/dist
+/rpi-controller/build
+**/*.vcd
+**/.DS_Store

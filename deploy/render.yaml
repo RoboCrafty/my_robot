@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: parol6-sim
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
