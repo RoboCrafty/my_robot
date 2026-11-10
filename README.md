@@ -2,7 +2,15 @@
 
 A custom control stack for the [PAROL6](https://source-robotics.github.io/PAROL-docs/) 6-axis desktop robot arm by Source Robotics. It replaces the stock controller with an ESP32 + TMC2209 drivers for the low level and a Raspberry Pi for everything smart: trajectory generation, inverse kinematics, a web UI and LeRobot integration.
 
-![Web UI](docs/web-ui.png)
+<p align="center">
+  <a href="https://parol6-sim.onrender.com">
+    <img src="https://img.shields.io/badge/%E2%96%B6%20TRY%20IT%20LIVE-Simulated%20arm%20in%20your%20browser-2ea44f?style=for-the-badge" alt="Try it live">
+  </a>
+</p>
+
+<p align="center"><sub>Runs the real C++ controller against a built-in ESP32 simulator, no hardware needed. It's on a free host, so the first load can take about a minute to wake up, and everyone shares one simulated arm.</sub></p>
+
+<a href="https://parol6-sim.onrender.com"><img src="docs/web-ui.png" alt="Web UI"></a>
 
 *The web UI: 3D view of the arm with a ghost-move tool, Cartesian/joint jogging, saved points, programs, and gripper control.*
 
