@@ -1,7 +1,7 @@
 // Damped-least-squares IK over a urdf-loader joint chain.
 //
 // The defaults mirror Kinematics::InverseKinematics_Positional in
-// pinocchio/src/kinematics.hpp (tolerances, damping, step clamp, iteration cap,
+// rpi-controller/src/kinematics.hpp (tolerances, damping, step clamp, iteration cap,
 // reach check). When the preview is solved the same way from the same seed as
 // the controller, "reachable" here means the controller will actually move.
 import * as THREE from 'three';
