@@ -138,7 +138,7 @@ YAW_ROTATION_MATRIX = np.array([
 ])
 
 # --- Teleop main loop --------------------------------------------------------
-POSITION_GAIN = 1.3
+POSITION_GAIN = 1.6
 ROTATION_GAIN = 1.0
 RATE_HZ = 50.0
 VEL_CAP = 0.3
