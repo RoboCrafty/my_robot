@@ -31,19 +31,26 @@ class myParol6Config(RobotConfig):
     crops: dict[str, list[int]] = field(default_factory=dict)
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
-            "cam_1": OpenCVCameraConfig(
-                index_or_path=0,
+
+            "gripper_cam": OpenCVCameraConfig(
+                index_or_path=1,
                 fps=30,
-                width=1280,
-                height=720,
+                width=640,
+                height=480,
                 # rotation=Cv2Rotation.ROTATE_180,
             ),
-            "cam_2": OpenCVCameraConfig(
-                index_or_path=1,
-                # Iriun on AVFoundation always opens 720p at 60 fps; recording still samples at 30
-                fps=60,
-                width=1280,
-                height=720,
+            "topdown_cam": OpenCVCameraConfig(
+                            index_or_path=3,
+                            fps=60,
+                            width=1280,
+                            height=720,
+                            # rotation=Cv2Rotation.ROTATE_180,
+                        ),
+            "isometric_cam": OpenCVCameraConfig(
+                index_or_path=0,
+                fps=30,
+                width=640,
+                height=480,
             ),
         }
     )

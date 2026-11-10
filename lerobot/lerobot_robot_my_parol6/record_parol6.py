@@ -5,6 +5,32 @@ The teleop script drives the controller; this script only watches. Each tick it 
 measured joints (`pos`, `grip_ack`) as the observation, and the controller's commanded IK joint target +
 gripper command (`tgt`, `grip`) as the action -- no time-shifting needed.
 
+Run from this directory after setting up the LeRobot environment. Examples:
+
+    # Record real cameras; cam_2 is Iriun (1280x720), downscaled to 640x360.
+    python record_parol6.py --repo-id RoboCrafty/parol6_iriun --task "pick up the cube" \\
+        --episodes 50 --fps 30 --max-episode-s 60 --downscales '{"cam_2": 2}'
+
+    # Downscale every camera by 2 instead (1280x720 becomes 640x360).
+    python record_parol6.py --repo-id RoboCrafty/parol6_small --task "pick up the cube" --downscale 2
+
+    # Crop cam_2 to a 640x480 region starting at x=320, y=0 before resizing.
+    python record_parol6.py --repo-id RoboCrafty/parol6_crop --task "pick up the cube" \\
+        --crops '{"cam_2": [320, 0, 640, 480]}'
+
+    # Record in MuJoCo; --stacked starts each reset with the cubes stacked.
+    python record_parol6.py --repo-id RoboCrafty/parol6_sim --task "stack the cubes" --sim --stacked
+
+    # Append to an existing dataset (same repo ID, camera features, and FPS).
+    python record_parol6.py --repo-id RoboCrafty/parol6_iriun --task "pick up the cube" --resume
+
+    # Optional controller address and local dataset directory.
+    python record_parol6.py --repo-id RoboCrafty/parol6_test --task "pick up the cube" \\
+        --host 192.168.1.20 --root /data/parol6
+
+    # Upload a completed local dataset to the Hugging Face Hub (uses the repo ID as its argument).
+    python push_dataset.py RoboCrafty/parol6_iriun
+
 Keys (global, so they work while the teleop window has focus):
     Right arrow  start recording / stop and save the episode
     Left arrow   discard the episode being recorded
