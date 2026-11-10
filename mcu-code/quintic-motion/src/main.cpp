@@ -78,7 +78,6 @@ int32_t tick_error[6] = {0, 0, 0, 0, 0, 0};                // Tracks accumulated
 void printLimitSwitchStates();
 void handleLostDrivers();
 void readGripperTargetFromSerial();
-void handleLostDrivers();
 void setup() {
     // Headroom for the Pi's 500 Hz stream while the loop is briefly busy (an
     // odometer flash write, a driver enable over UART): with the default 256 B
@@ -408,7 +407,6 @@ void loop() {
     packetSerial.update();
     handleLostDrivers();   // also when the host isn't streaming
     // readGripperTargetFromSerial();
-    handleLostDrivers();   // also when the host isn't streaming
 
     if (current_time - last_loop_time >= 100) {
         last_loop_time += 100;
