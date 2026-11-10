@@ -1,7 +1,7 @@
 services:
   - type: web
     name: parol6-sim
-    runtime: docker
+    runtime: image
     plan: free
-    dockerfilePath: ./deploy/Dockerfile
-    dockerContext: .
+    image:
+      url: ghcr.io/robocrafty/parol6-sim:latest

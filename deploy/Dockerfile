@@ -26,13 +26,13 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules --branch ${PIN
     && cmake -S /pin-src -B /pin-src/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/pinocchio \
         -DBUILD_PYTHON_INTERFACE=OFF -DGENERATE_PYTHON_STUBS=OFF -DBUILD_TESTING=OFF \
         -DBUILD_WITH_COLLISION_SUPPORT=OFF -DBUILD_UTILS=OFF \
-    && cmake --build /pin-src/build --target install -j4 \
+    && cmake --build /pin-src/build --target install -j3 \
     && rm -rf /pin-src
 
 COPY rpi-controller/CMakeLists.txt /app/rpi-controller/CMakeLists.txt
 COPY rpi-controller/src /app/rpi-controller/src
 WORKDIR /app/rpi-controller
-RUN cmake -B build -DCMAKE_PREFIX_PATH=/opt/pinocchio && cmake --build build --target parolController -j4
+RUN cmake -B build -DCMAKE_PREFIX_PATH=/opt/pinocchio && cmake --build build --target parolController -j3
 
 # --- Runtime ---
 FROM ubuntu:24.04
