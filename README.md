@@ -20,7 +20,7 @@ flowchart LR
 
 **The ESP32 is a deliberately dumb low-level controller.** It does no planning or kinematics. The Raspberry Pi streams a position and velocity command for every joint at 500 Hz, and the ESP32 turns that into step pulses with [FastAccelStepper](https://github.com/gin66/FastAccelStepper), time-stamping each move so the motors follow the commanded trajectory smoothly. It also handles homing, limit switches, TMC2209 setup over UART, motor power-loss detection, and lifetime odometry (stored in flash). It reports actual positions and status back in every reply.
 
-**The Raspberry Pi is the brain.** The C++ controller runs a 500 Hz loop that:
+**The Raspberry Pi is the brain, and it must run a real-time Linux kernel.** The 500 Hz loop has a hard 2 ms deadline: the ESP32 consumes a command every tick, so a late tick shows up as stutter or whining motors. The controller uses absolute-time sleeps and runs under `SCHED_FIFO` (`chrt -f 90`), which only gives reliable timing on a `PREEMPT_RT` kernel. The loop:
 
 - generates jerk-limited trajectories with [Ruckig](https://github.com/pantor/ruckig),
 - solves inverse kinematics and Jacobians with [Pinocchio](https://github.com/stack-of-tasks/pinocchio) (joint moves and straight-line Cartesian moves in base or tool frame),
@@ -54,7 +54,7 @@ pio run -t upload
 
 The firmware can also be simulated in Wokwi (see [wokwi.toml](wokwi.toml) and [diagram.json](diagram.json)).
 
-**Controller** (on the Raspberry Pi):
+**Controller** (on the Raspberry Pi, real-time kernel required, see [Architecture](#architecture)):
 
 ```bash
 cd rpi-controller
