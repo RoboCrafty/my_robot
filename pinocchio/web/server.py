@@ -187,8 +187,9 @@ class ProgramRunner:
     broadcast so the editor can highlight the running line.
     """
 
-    def __init__(self, nodes: list[dict], step: bool = False):
+    def __init__(self, nodes: list[dict], step: bool = False, park_after: bool = False):
         self.nodes = nodes
+        self.park_after = park_after
         self.node_id: str | None = None
         self.counters: dict[str, str] = {}
         self.error: str | None = None
@@ -248,6 +249,9 @@ class ProgramRunner:
     async def _main(self) -> None:
         try:
             await self._block(self.nodes, ())
+            if self.park_after:
+                await asyncio.sleep(0.6)   # let the arm settle on the floor before torque drops
+                send_cmd("park")
         except asyncio.CancelledError:
             send_cmd("stop")
             raise
@@ -274,9 +278,15 @@ class ProgramRunner:
             angles = wp_angles(node["wp"]) if node.get("wp") else node.get("angles")
             if not angles or len(angles) != NJ:
                 raise ValueError(f"move: unknown waypoint {node.get('wp')!r}")
+            # The controller refuses motion without motor power or homing; a
+            # refused move would otherwise read as an instantly finished one.
+            if latest_state.get("block"):
+                raise ValueError(f"move refused: {latest_state['block']}")
             joints = " ".join(f"{float(x):.3f}" for x in angles)
             send_cmd(f"movel q {joints}" if node.get("motion") == "l" else joints)
             await wait_for_move()
+            if latest_state.get("block"):
+                raise ValueError(f"move interrupted: {latest_state['block']}")
             if node.get("dwell"):
                 await asyncio.sleep(float(node["dwell"]))
 
@@ -403,6 +413,17 @@ async def ws_endpoint(ws: WebSocket):
                 runner = ProgramRunner(m["nodes"], step=m.get("step", False))
                 runner.start()
                 await push_prog()
+
+            elif t == "standby":
+                # Run the saved "Standby" program (ready, then a straight move to
+                # the resting pose), then cut torque so the motor supply can go.
+                nodes = cfg["programs"].get("Standby")
+                if nodes:
+                    if runner is not None:
+                        runner.stop()
+                    runner = ProgramRunner(nodes, park_after=True)
+                    runner.start()
+                    await push_prog()
 
             elif t == "prog_ctl" and runner is not None:
                 {"pause": runner.pause, "resume": runner.resume,

@@ -923,6 +923,8 @@ const actions = {
     home: () => cmd('home'),
     ready: () => cmd('ready'),
     stop: () => { stopEverything(); send({ type: 'prog_ctl', action: 'stop' }); cmd('stop'); },
+    park: () => { if (confirm('Move to standby and turn motor torque off?')) send({ type: 'standby' }); },
+    unpark: () => cmd('unpark'),
     rehome: () => { if (confirm('Rehome all joints using the limit switches?')) cmd('rehome'); },
     applyLimits, saveSettings, resetSettings, saveGrip,
     teachWp: () => teachWp(),

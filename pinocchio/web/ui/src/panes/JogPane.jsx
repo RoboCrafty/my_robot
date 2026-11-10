@@ -13,8 +13,7 @@ export function JogPane() {
         <>
             <Section>
                 <div className="row2">
-                    <Seg grow label="Jog mode" value={S.jogMode} onChange={(v) => setS({ jogMode: v })}
-                        items={[['hold', 'Hold', 'move while pressed'], ['step', 'Step', 'one increment per tap']]} />
+                    <JogModeSeg />
                     <Seg grow label="Frame" value={S.cartFrame} onChange={setFrame}
                         items={[['base', 'Base'], ['tool', 'Tool']]} />
                 </div>
@@ -48,6 +47,16 @@ export function JogPane() {
 
             <Gripper />
         </>
+    );
+}
+
+// Hold/Step drives both the Cartesian pads and the joint +/- buttons, so it is
+// shown on both tabs rather than only here.
+export function JogModeSeg() {
+    const jogMode = useStore((s) => s.S.jogMode);
+    return (
+        <Seg grow label="Jog mode" value={jogMode} onChange={(v) => setS({ jogMode: v })}
+            items={[['hold', 'Hold', 'move while pressed'], ['step', 'Step', 'one increment per tap']]} />
     );
 }
 

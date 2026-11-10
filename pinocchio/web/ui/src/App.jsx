@@ -71,7 +71,9 @@ export function App() {
                 <JogHud />
                 <Dock />
                 <Panel />
-                <Toaster theme={theme} position="top-center" toastOptions={{ className: 'toast' }} />
+                {/* Below the top bar: a toast must never sit on top of Ready / Rehome / Stop. */}
+                <Toaster theme={theme} position="top-center" offset={{ top: 72 }} mobileOffset={{ top: 62 }}
+                    toastOptions={{ className: 'toast' }} />
             </div>
         </MotionConfig>
     );
